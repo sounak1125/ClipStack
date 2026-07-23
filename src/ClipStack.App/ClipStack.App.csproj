@@ -1,0 +1,33 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\clipstack.ico</ApplicationIcon>
+    <AssemblyName>ClipStack</AssemblyName>
+    <RootNamespace>ClipStack</RootNamespace>
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
+    <DisableWinExeOutputInference>true</DisableWinExeOutputInference>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Velopack" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ClipStack.Core\ClipStack.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\release-config.json" Link="release-config.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Remove="Assets\clipstack.ico" />
+    <Resource Include="Assets\clipstack.ico" />
+  </ItemGroup>
+
+</Project>

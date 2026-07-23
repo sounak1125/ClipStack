@@ -1,0 +1,549 @@
+using System.Text;
+using System.Text.Json;
+using ClipStack.Core.Models;
+using ClipStack.Core.Utilities;
+
+namespace ClipStack.Core.Storage;
+
+public sealed class HistoryStore
+{
+    private readonly StoragePaths _paths;
+    private readonly object _gate = new();
+    private ClipboardIndex _index = new();
+
+    public HistoryStore(StoragePaths paths)
+    {
+        _paths = paths;
+    }
+
+    public StoragePaths Paths => _paths;
+
+    public IReadOnlyList<ClipboardItem> Items
+    {
+        get
+        {
+            lock (_gate)
+                return _index.Items.ToList();
+        }
+    }
+
+    public void Initialize()
+    {
+        _paths.EnsureCreated();
+        CleanupTemporaryFolders();
+        _index = LoadOrRecoverIndex();
+        ValidateAndPruneMissingPayloads();
+        SaveIndexAtomic();
+    }
+
+    public ClipboardItem? FindByHash(string contentHash)
+    {
+        lock (_gate)
+            return _index.Items.FirstOrDefault(i => string.Equals(i.ContentHash, contentHash, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public ClipboardItem? GetById(Guid id)
+    {
+        lock (_gate)
+            return _index.Items.FirstOrDefault(i => i.Id == id);
+    }
+
+    public (ClipboardItem Item, bool WasDuplicate) AddOrPromote(NewClipboardItemData data, int historyLimit)
+    {
+        if (historyLimit < 1) historyLimit = 1;
+
+        lock (_gate)
+        {
+            var existing = _index.Items.FirstOrDefault(i =>
+                string.Equals(i.ContentHash, data.ContentHash, StringComparison.OrdinalIgnoreCase));
+
+            if (existing is not null)
+            {
+                existing.LastUsedUtc = DateTimeOffset.UtcNow;
+                _index.Items.Remove(existing);
+                _index.Items.Insert(0, existing);
+                SaveIndexAtomic_NoLock();
+                return (existing, true);
+            }
+
+            var id = Guid.NewGuid();
+            var tempDir = _paths.GetTempItemDirectory(id);
+            var finalDir = _paths.GetItemDirectory(id);
+
+            try
+            {
+                if (Directory.Exists(tempDir))
+                    Directory.Delete(tempDir, recursive: true);
+                Directory.CreateDirectory(tempDir);
+
+                var payloads = new List<ClipboardPayload>();
+                long totalSize = 0;
+
+                foreach (var request in data.Payloads)
+                {
+                    var fileName = request.RelativeFileName ?? PayloadFileNames.ForFormat(request.Format);
+                    if (fileName.Contains("..", StringComparison.Ordinal) || Path.IsPathRooted(fileName))
+                        throw new InvalidOperationException("Unsafe payload file name.");
+
+                    var fullPath = Path.Combine(tempDir, fileName);
+                    File.WriteAllBytes(fullPath, request.Bytes);
+                    totalSize += request.Bytes.LongLength;
+
+                    payloads.Add(new ClipboardPayload
+                    {
+                        Format = request.Format,
+                        RelativePath = fileName,
+                        SizeBytes = request.Bytes.LongLength,
+                    });
+                }
+
+                if (Directory.Exists(finalDir))
+                    Directory.Delete(finalDir, recursive: true);
+                Directory.Move(tempDir, finalDir);
+
+                var thumbnail = payloads.FirstOrDefault(p => p.Format == ClipboardFormatKind.ThumbnailPng);
+
+                var item = new ClipboardItem
+                {
+                    Id = id,
+                    CapturedUtc = DateTimeOffset.UtcNow,
+                    LastUsedUtc = DateTimeOffset.UtcNow,
+                    DominantKind = data.DominantKind,
+                    ContentHash = data.ContentHash,
+                    TotalSizeBytes = totalSize,
+                    PreviewText = data.PreviewText,
+                    CharacterCount = data.CharacterCount,
+                    ImageWidth = data.ImageWidth,
+                    ImageHeight = data.ImageHeight,
+                    FileCount = data.FilePaths.Count,
+                    Payloads = payloads,
+                    FilePaths = data.FilePaths.ToList(),
+                    ThumbnailRelativePath = thumbnail?.RelativePath,
+                };
+
+                _index.Items.Insert(0, item);
+
+                var evicted = new List<ClipboardItem>();
+                while (_index.Items.Count > historyLimit)
+                {
+                    var last = _index.Items[^1];
+                    _index.Items.RemoveAt(_index.Items.Count - 1);
+                    evicted.Add(last);
+                }
+
+                SaveIndexAtomic_NoLock();
+
+                foreach (var e in evicted)
+                    TryDeleteItemFolder(e.Id);
+
+                return (item, false);
+            }
+            catch
+            {
+                TryDeleteDirectory(tempDir);
+                throw;
+            }
+        }
+    }
+
+    public bool DeleteItem(Guid id)
+    {
+        lock (_gate)
+        {
+            var item = _index.Items.FirstOrDefault(i => i.Id == id);
+            if (item is null)
+                return false;
+
+            _index.Items.Remove(item);
+            SaveIndexAtomic_NoLock();
+            TryDeleteItemFolder(id);
+            return true;
+        }
+    }
+
+    public void ClearAll()
+    {
+        List<Guid> ids;
+        lock (_gate)
+        {
+            ids = _index.Items.Select(i => i.Id).ToList();
+            _index.Items.Clear();
+            SaveIndexAtomic_NoLock();
+        }
+
+        foreach (var id in ids)
+            TryDeleteItemFolder(id);
+
+        CleanupTemporaryFolders();
+    }
+
+    public void Touch(Guid id)
+    {
+        lock (_gate)
+        {
+            var item = _index.Items.FirstOrDefault(i => i.Id == id);
+            if (item is null) return;
+            item.LastUsedUtc = DateTimeOffset.UtcNow;
+            _index.Items.Remove(item);
+            _index.Items.Insert(0, item);
+            SaveIndexAtomic_NoLock();
+        }
+    }
+
+    public string ResolvePayloadPath(ClipboardItem item, ClipboardPayload payload)
+    {
+        var itemDir = _paths.GetItemDirectory(item.Id);
+        return PathSafety.ResolveSafeRelativePath(itemDir, payload.RelativePath);
+    }
+
+    public string? ResolveThumbnailPath(ClipboardItem item)
+    {
+        if (string.IsNullOrWhiteSpace(item.ThumbnailRelativePath))
+            return null;
+        var itemDir = _paths.GetItemDirectory(item.Id);
+        return PathSafety.ResolveSafeRelativePath(itemDir, item.ThumbnailRelativePath);
+    }
+
+    public long CalculateDiskUsageBytes()
+    {
+        if (!Directory.Exists(_paths.Items))
+            return 0;
+
+        long total = 0;
+        foreach (var file in Directory.EnumerateFiles(_paths.Items, "*", SearchOption.AllDirectories))
+        {
+            try { total += new FileInfo(file).Length; }
+            catch { /* ignore */ }
+        }
+
+        try
+        {
+            if (File.Exists(_paths.IndexFile))
+                total += new FileInfo(_paths.IndexFile).Length;
+        }
+        catch { /* ignore */ }
+
+        return total;
+    }
+
+    public byte[]? ReadPayloadBytes(ClipboardItem item, ClipboardFormatKind format)
+    {
+        var payload = item.Payloads.FirstOrDefault(p => p.Format == format);
+        if (payload is null)
+            return null;
+
+        var path = ResolvePayloadPath(item, payload);
+        if (!File.Exists(path))
+            return null;
+
+        return File.ReadAllBytes(path);
+    }
+
+    public string? ReadPayloadText(ClipboardItem item, ClipboardFormatKind format)
+    {
+        var bytes = ReadPayloadBytes(item, format);
+        return bytes is null ? null : Encoding.UTF8.GetString(bytes);
+    }
+
+    public void CleanupTemporaryFolders()
+    {
+        if (!Directory.Exists(_paths.Items))
+            return;
+
+        foreach (var dir in Directory.EnumerateDirectories(_paths.Items, ".tmp-*"))
+            TryDeleteDirectory(dir);
+    }
+
+    private ClipboardIndex LoadOrRecoverIndex()
+    {
+        if (!File.Exists(_paths.IndexFile))
+            return ReconstructFromFolders();
+
+        try
+        {
+            var json = File.ReadAllText(_paths.IndexFile, Encoding.UTF8);
+            var index = JsonSerializer.Deserialize<ClipboardIndex>(json, AppIdentity.JsonOptions);
+            if (index is null)
+                throw new InvalidDataException("Index deserialized to null.");
+
+            foreach (var item in index.Items)
+                ValidateItemPaths(item);
+
+            return index;
+        }
+        catch
+        {
+            BackupCorruptIndex();
+            return ReconstructFromFolders();
+        }
+    }
+
+    private void ValidateItemPaths(ClipboardItem item)
+    {
+        foreach (var payload in item.Payloads)
+        {
+            if (string.IsNullOrWhiteSpace(payload.RelativePath)
+                || payload.RelativePath.Contains("..", StringComparison.Ordinal)
+                || Path.IsPathRooted(payload.RelativePath))
+            {
+                throw new InvalidDataException("Unsafe payload path in index.");
+            }
+
+            var itemRoot = _paths.GetItemDirectory(item.Id);
+            var full = Path.GetFullPath(Path.Combine(itemRoot, payload.RelativePath));
+            if (!PathSafety.IsPathInsideRoot(itemRoot, full))
+                throw new InvalidDataException("Path traversal in index.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(item.ThumbnailRelativePath))
+        {
+            if (item.ThumbnailRelativePath.Contains("..", StringComparison.Ordinal)
+                || Path.IsPathRooted(item.ThumbnailRelativePath))
+            {
+                throw new InvalidDataException("Unsafe thumbnail path in index.");
+            }
+        }
+    }
+
+    private void BackupCorruptIndex()
+    {
+        try
+        {
+            var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+            var backup = Path.Combine(_paths.Root, $"index.corrupt.{stamp}.json");
+            File.Move(_paths.IndexFile, backup, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(_paths.IndexFile); } catch { /* best effort */ }
+        }
+    }
+
+    private ClipboardIndex ReconstructFromFolders()
+    {
+        var index = new ClipboardIndex();
+        if (!Directory.Exists(_paths.Items))
+            return index;
+
+        foreach (var dir in Directory.EnumerateDirectories(_paths.Items))
+        {
+            var name = Path.GetFileName(dir);
+            if (name.StartsWith(".tmp-", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (!Guid.TryParse(name, out var id))
+                continue;
+
+            try
+            {
+                var item = ReconstructItem(id, dir);
+                if (item is not null)
+                    index.Items.Add(item);
+            }
+            catch
+            {
+                // skip unreadable folders
+            }
+        }
+
+        index.Items = index.Items
+            .OrderByDescending(i => i.LastUsedUtc)
+            .ToList();
+
+        return index;
+    }
+
+    private static ClipboardItem? ReconstructItem(Guid id, string dir)
+    {
+        var payloads = new List<ClipboardPayload>();
+        long total = 0;
+
+        void AddIfExists(ClipboardFormatKind format, string fileName)
+        {
+            var path = Path.Combine(dir, fileName);
+            if (!File.Exists(path)) return;
+            var len = new FileInfo(path).Length;
+            total += len;
+            payloads.Add(new ClipboardPayload
+            {
+                Format = format,
+                RelativePath = fileName,
+                SizeBytes = len,
+            });
+        }
+
+        AddIfExists(ClipboardFormatKind.UnicodeText, PayloadFileNames.Text);
+        AddIfExists(ClipboardFormatKind.Html, PayloadFileNames.Html);
+        AddIfExists(ClipboardFormatKind.Rtf, PayloadFileNames.Rtf);
+        AddIfExists(ClipboardFormatKind.ImagePng, PayloadFileNames.Image);
+        AddIfExists(ClipboardFormatKind.ThumbnailPng, PayloadFileNames.Thumbnail);
+        AddIfExists(ClipboardFormatKind.FileDropList, PayloadFileNames.Files);
+
+        if (payloads.Count == 0)
+            return null;
+
+        var kind = ClipboardItemKind.Unknown;
+        var preview = string.Empty;
+        var charCount = 0;
+        int? w = null, h = null;
+        var files = new List<string>();
+
+        var textPath = Path.Combine(dir, PayloadFileNames.Text);
+        if (File.Exists(textPath))
+        {
+            var text = File.ReadAllText(textPath, Encoding.UTF8);
+            preview = TextPreview.Create(text);
+            charCount = text.Length;
+            kind = File.Exists(Path.Combine(dir, PayloadFileNames.Html))
+                || File.Exists(Path.Combine(dir, PayloadFileNames.Rtf))
+                ? ClipboardItemKind.RichText
+                : ClipboardItemKind.Text;
+        }
+
+        if (File.Exists(Path.Combine(dir, PayloadFileNames.Image)))
+        {
+            kind = ClipboardItemKind.Image;
+            if (string.IsNullOrEmpty(preview))
+                preview = "Image";
+        }
+
+        var filesPath = Path.Combine(dir, PayloadFileNames.Files);
+        if (File.Exists(filesPath))
+        {
+            kind = ClipboardItemKind.Files;
+            try
+            {
+                files = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(filesPath), AppIdentity.JsonOptions) ?? [];
+                preview = string.Join(", ", files.Take(2).Select(Path.GetFileName));
+            }
+            catch { /* ignore */ }
+        }
+
+        var thumb = payloads.FirstOrDefault(p => p.Format == ClipboardFormatKind.ThumbnailPng);
+        var utc = Directory.GetCreationTimeUtc(dir);
+
+        return new ClipboardItem
+        {
+            Id = id,
+            CapturedUtc = new DateTimeOffset(utc, TimeSpan.Zero),
+            LastUsedUtc = new DateTimeOffset(utc, TimeSpan.Zero),
+            DominantKind = kind,
+            ContentHash = "recovered-" + id.ToString("N"),
+            TotalSizeBytes = total,
+            PreviewText = preview,
+            CharacterCount = charCount,
+            ImageWidth = w,
+            ImageHeight = h,
+            FileCount = files.Count,
+            Payloads = payloads,
+            FilePaths = files,
+            ThumbnailRelativePath = thumb?.RelativePath,
+        };
+    }
+
+    private void ValidateAndPruneMissingPayloads()
+    {
+        var kept = new List<ClipboardItem>();
+        foreach (var item in _index.Items)
+        {
+            try
+            {
+                ValidateItemPaths(item);
+            }
+            catch
+            {
+                continue;
+            }
+
+            var itemDir = _paths.GetItemDirectory(item.Id);
+            if (!Directory.Exists(itemDir))
+                continue;
+
+            var requiredOk = true;
+            var validPayloads = new List<ClipboardPayload>();
+            foreach (var payload in item.Payloads)
+            {
+                try
+                {
+                    var path = PathSafety.ResolveSafeRelativePath(itemDir, payload.RelativePath);
+                    if (File.Exists(path))
+                        validPayloads.Add(payload);
+                    else if (payload.Format is ClipboardFormatKind.UnicodeText
+                             or ClipboardFormatKind.ImagePng
+                             or ClipboardFormatKind.FileDropList)
+                    {
+                        requiredOk = false;
+                        break;
+                    }
+                }
+                catch
+                {
+                    requiredOk = false;
+                    break;
+                }
+            }
+
+            if (!requiredOk || validPayloads.Count == 0)
+                continue;
+
+            item.Payloads = validPayloads;
+            kept.Add(item);
+        }
+
+        _index.Items = kept;
+
+        // Remove orphan folders not referenced by index
+        if (Directory.Exists(_paths.Items))
+        {
+            var known = kept.Select(i => i.Id).ToHashSet();
+            foreach (var dir in Directory.EnumerateDirectories(_paths.Items))
+            {
+                var name = Path.GetFileName(dir);
+                if (name.StartsWith(".tmp-", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (Guid.TryParse(name, out var id) && !known.Contains(id))
+                    TryDeleteDirectory(dir);
+            }
+        }
+    }
+
+    private void SaveIndexAtomic()
+    {
+        lock (_gate)
+            SaveIndexAtomic_NoLock();
+    }
+
+    private void SaveIndexAtomic_NoLock()
+    {
+        _paths.EnsureCreated();
+        var tmp = _paths.IndexFile + ".tmp";
+        var json = JsonSerializer.Serialize(_index, AppIdentity.JsonOptions);
+        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+        using (var writer = new StreamWriter(fs, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+        {
+            writer.Write(json);
+            writer.Flush();
+            fs.Flush(flushToDisk: true);
+        }
+
+        PathSafety.AtomicReplaceFile(_paths.IndexFile, tmp);
+    }
+
+    private void TryDeleteItemFolder(Guid id)
+    {
+        TryDeleteDirectory(_paths.GetItemDirectory(id));
+        TryDeleteDirectory(_paths.GetTempItemDirectory(id));
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+                Directory.Delete(path, recursive: true);
+        }
+        catch
+        {
+            // best effort
+        }
+    }
+}

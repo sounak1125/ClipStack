@@ -1,0 +1,16 @@
+global using System.IO;
+global using Application = System.Windows.Application;
+global using Point = System.Windows.Point;
+global using Rect = System.Windows.Rect;
+global using Size = System.Windows.Size;
+global using IDataObject = System.Windows.IDataObject;
+global using DataObject = System.Windows.DataObject;
+global using Clipboard = System.Windows.Clipboard;
+global using DataFormats = System.Windows.DataFormats;
+global using TextDataFormat = System.Windows.TextDataFormat;
+global using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+global using MessageBox = System.Windows.MessageBox;
+global using MessageBoxButton = System.Windows.MessageBoxButton;
+global using MessageBoxImage = System.Windows.MessageBoxImage;
+global using MessageBoxResult = System.Windows.MessageBoxResult;
+global using UserControl = System.Windows.Controls.UserControl;

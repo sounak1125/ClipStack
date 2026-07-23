@@ -1,0 +1,147 @@
+using System.Windows;
+using System.Windows.Input;
+using ClipStack.ViewModels;
+
+namespace ClipStack.Views;
+
+public partial class ClipboardPopupWindow : Window
+{
+    private bool _suppressDeactivateHide;
+    private bool _openingSettings;
+
+    public event Action? PasteRequested;
+    public event Action? DeleteRequested;
+    public event Action? SettingsRequested;
+    public event Action? ClearRequested;
+    public event Action? CloseRequested;
+
+    public ClipboardPopupWindow()
+    {
+        InitializeComponent();
+    }
+
+    public PopupViewModel? ViewModel => DataContext as PopupViewModel;
+
+    public void BeginSuppressDeactivate() => _suppressDeactivateHide = true;
+
+    public void EndSuppressDeactivate() => _suppressDeactivateHide = false;
+
+    private void OnDeactivated(object? sender, EventArgs e)
+    {
+        if (_suppressDeactivateHide || _openingSettings)
+            return;
+        CloseRequested?.Invoke();
+    }
+
+    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        var vm = ViewModel;
+        if (vm is null) return;
+
+        switch (e.Key)
+        {
+            case Key.Escape:
+                CloseRequested?.Invoke();
+                e.Handled = true;
+                break;
+            case Key.Enter:
+                PasteRequested?.Invoke();
+                e.Handled = true;
+                break;
+            case Key.Delete:
+                DeleteRequested?.Invoke();
+                e.Handled = true;
+                break;
+            case Key.Up:
+                MoveSelection(-1);
+                e.Handled = true;
+                break;
+            case Key.Down:
+                MoveSelection(1);
+                e.Handled = true;
+                break;
+            case Key.D1:
+            case Key.NumPad1:
+                SelectByNumber(1); e.Handled = true; break;
+            case Key.D2:
+            case Key.NumPad2:
+                SelectByNumber(2); e.Handled = true; break;
+            case Key.D3:
+            case Key.NumPad3:
+                SelectByNumber(3); e.Handled = true; break;
+            case Key.D4:
+            case Key.NumPad4:
+                SelectByNumber(4); e.Handled = true; break;
+            case Key.D5:
+            case Key.NumPad5:
+                SelectByNumber(5); e.Handled = true; break;
+            case Key.D6:
+            case Key.NumPad6:
+                SelectByNumber(6); e.Handled = true; break;
+            case Key.D7:
+            case Key.NumPad7:
+                SelectByNumber(7); e.Handled = true; break;
+            case Key.D8:
+            case Key.NumPad8:
+                SelectByNumber(8); e.Handled = true; break;
+            case Key.D9:
+            case Key.NumPad9:
+                SelectByNumber(9); e.Handled = true; break;
+            case Key.D0:
+            case Key.NumPad0:
+                SelectByNumber(10); e.Handled = true; break;
+        }
+    }
+
+    private void MoveSelection(int delta)
+    {
+        var vm = ViewModel;
+        if (vm is null || vm.Items.Count == 0) return;
+        var index = vm.SelectedItem is null ? 0 : vm.Items.IndexOf(vm.SelectedItem);
+        index = Math.Clamp(index + delta, 0, vm.Items.Count - 1);
+        vm.SelectedItem = vm.Items[index];
+        HistoryList.ScrollIntoView(vm.SelectedItem);
+    }
+
+    private void SelectByNumber(int number)
+    {
+        var vm = ViewModel;
+        if (vm is null) return;
+        var item = vm.Items.FirstOrDefault(i => i.ShortcutNumber == number);
+        if (item is null) return;
+        vm.SelectedItem = item;
+        PasteRequested?.Invoke();
+    }
+
+    private void OnItemClick(object sender, MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is DependencyObject d
+            && FindAncestor<System.Windows.Controls.ListBoxItem>(d) is not null
+            && HistoryList.SelectedItem is not null)
+        {
+            PasteRequested?.Invoke();
+        }
+    }
+
+    private static T? FindAncestor<T>(DependencyObject current) where T : DependencyObject
+    {
+        while (current is not null)
+        {
+            if (current is T match)
+                return match;
+            current = System.Windows.Media.VisualTreeHelper.GetParent(current);
+        }
+        return null;
+    }
+
+    private void OnSettingsClick(object sender, RoutedEventArgs e)
+    {
+        _openingSettings = true;
+        try { SettingsRequested?.Invoke(); }
+        finally { _openingSettings = false; }
+    }
+
+    private void OnClearClick(object sender, RoutedEventArgs e) => ClearRequested?.Invoke();
+
+    private void OnCloseClick(object sender, RoutedEventArgs e) => CloseRequested?.Invoke();
+}

@@ -1,0 +1,47 @@
+## Build
+bin/
+obj/
+artifacts/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.DotSettings.user
+
+## NuGet
+*.nupkg
+**/packages/*
+!**/packages/build/
+project.lock.json
+project.fragment.lock.json
+
+## Logs / local
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+## Test / coverage
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+
+## Tools
+.tools/
+**/tool-manifest.bak
+
+## Publish
+publish/
+releases/
+Velopack/
+*.exe
+!tools/**
+
+## Secrets
+*.pfx
+*.p12
+*.snk
+.env
+*.key

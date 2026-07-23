@@ -1,0 +1,83 @@
+name: Publish ClipStack release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semantic version, for example 1.0.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ inputs.version }}"
+          } else {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+          }
+
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9\.-]+)?$') {
+            throw "Invalid semantic version: $version"
+          }
+
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Restore Velopack tool
+        shell: pwsh
+        run: dotnet tool restore
+
+      - name: Download previous release metadata
+        shell: pwsh
+        run: |
+          dotnet tool run vpk download github `
+            --repoUrl "https://github.com/${{ github.repository }}" `
+            --token "${{ secrets.GITHUB_TOKEN }}" `
+            --channel win `
+            --outputDir artifacts/releases
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "No previous release was available; creating the first full package."
+          }
+
+      - name: Build and package
+        shell: pwsh
+        run: .\tools\build-release.ps1 -Version "${{ steps.version.outputs.value }}"
+
+      - name: Publish GitHub release
+        shell: pwsh
+        run: |
+          dotnet tool run vpk upload github `
+            --repoUrl "https://github.com/${{ github.repository }}" `
+            --token "${{ secrets.GITHUB_TOKEN }}" `
+            --channel win `
+            --outputDir artifacts/releases `
+            --publish `
+            --tag "v${{ steps.version.outputs.value }}" `
+            --releaseName "ClipStack ${{ steps.version.outputs.value }}" `
+            --targetCommitish "${{ github.sha }}"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub release upload failed with exit code $LASTEXITCODE."
+          }

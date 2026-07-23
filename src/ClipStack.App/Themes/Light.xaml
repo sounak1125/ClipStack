@@ -1,0 +1,34 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Color x:Key="BgColor">#FFF5F3EE</Color>
+  <Color x:Key="SurfaceColor">#FFFBFAF7</Color>
+  <Color x:Key="BorderColor">#FFD7D2C8</Color>
+  <Color x:Key="TextColor">#FF211F1B</Color>
+  <Color x:Key="MutedColor">#FF6F6A61</Color>
+  <Color x:Key="AccentColor">#FFD65F32</Color>
+  <Color x:Key="AccentForegroundColor">#FFFFFFFF</Color>
+  <Color x:Key="DangerColor">#FFB42318</Color>
+  <Color x:Key="SelectedColor">#FFF4DDD3</Color>
+  <Color x:Key="HoverColor">#FFECE8E0</Color>
+  <Color x:Key="HeaderColor">#FFEFECE5</Color>
+  <Color x:Key="TextKindColor">#FFD65F32</Color>
+  <Color x:Key="RichTextKindColor">#FF9B62B0</Color>
+  <Color x:Key="ImageKindColor">#FF258C82</Color>
+  <Color x:Key="FilesKindColor">#FFB07816</Color>
+
+  <SolidColorBrush x:Key="BgBrush" Color="{StaticResource BgColor}" />
+  <SolidColorBrush x:Key="SurfaceBrush" Color="{StaticResource SurfaceColor}" />
+  <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}" />
+  <SolidColorBrush x:Key="TextBrush" Color="{StaticResource TextColor}" />
+  <SolidColorBrush x:Key="MutedBrush" Color="{StaticResource MutedColor}" />
+  <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}" />
+  <SolidColorBrush x:Key="AccentForegroundBrush" Color="{StaticResource AccentForegroundColor}" />
+  <SolidColorBrush x:Key="DangerBrush" Color="{StaticResource DangerColor}" />
+  <SolidColorBrush x:Key="SelectedBrush" Color="{StaticResource SelectedColor}" />
+  <SolidColorBrush x:Key="HoverBrush" Color="{StaticResource HoverColor}" />
+  <SolidColorBrush x:Key="HeaderBrush" Color="{StaticResource HeaderColor}" />
+  <SolidColorBrush x:Key="TextKindBrush" Color="{StaticResource TextKindColor}" />
+  <SolidColorBrush x:Key="RichTextKindBrush" Color="{StaticResource RichTextKindColor}" />
+  <SolidColorBrush x:Key="ImageKindBrush" Color="{StaticResource ImageKindColor}" />
+  <SolidColorBrush x:Key="FilesKindBrush" Color="{StaticResource FilesKindColor}" />
+</ResourceDictionary>
