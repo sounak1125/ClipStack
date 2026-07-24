@@ -126,6 +126,31 @@ public class HistoryStoreTests
     }
 
     [TestMethod]
+    public void TrimToLimit_EvictsImmediately()
+    {
+        for (var i = 0; i < 5; i++)
+            _store.AddOrPromote(MakeTextItem($"item-{i}"), 10);
+
+        Assert.AreEqual(5, _store.Items.Count);
+        var removed = _store.TrimToLimit(2);
+        Assert.AreEqual(3, removed);
+        Assert.AreEqual(2, _store.Items.Count);
+        Assert.AreEqual("item-4", _store.Items[0].PreviewText);
+        Assert.AreEqual("item-3", _store.Items[1].PreviewText);
+    }
+
+    [TestMethod]
+    public void AddOrPromote_DuplicateAlsoRespectsLoweredLimit()
+    {
+        for (var i = 0; i < 4; i++)
+            _store.AddOrPromote(MakeTextItem($"item-{i}"), 10);
+
+        _ = _store.AddOrPromote(MakeTextItem("item-3"), 2);
+        Assert.AreEqual(2, _store.Items.Count);
+        Assert.AreEqual("item-3", _store.Items[0].PreviewText);
+    }
+
+    [TestMethod]
     public void AtomicSaveAndReload_PreservesItems()
     {
         _store.AddOrPromote(MakeTextItem("persist-me"), 10);
@@ -239,7 +264,7 @@ public class SettingsStoreTests
             store.Initialize();
             store.Update(s =>
             {
-                s.HistoryLimit = 25;
+                s.HistoryLimit = 20;
                 s.AutoPaste = false;
                 s.HotKey = new HotKeyConfiguration { Control = true, Alt = true, Shift = false, Win = false, VirtualKey = 0x51 };
             });
@@ -247,7 +272,7 @@ public class SettingsStoreTests
             var store2 = new SettingsStore(paths);
             store2.Initialize();
             var loaded = store2.Current;
-            Assert.AreEqual(25, loaded.HistoryLimit);
+            Assert.AreEqual(20, loaded.HistoryLimit);
             Assert.IsFalse(loaded.AutoPaste);
             Assert.AreEqual(0x51, loaded.HotKey.VirtualKey);
             Assert.IsTrue(loaded.HotKey.Alt);
@@ -374,5 +399,110 @@ public class ImageSizeGuardTests
         Assert.IsFalse(ImageSizeGuard.TryEstimateUncompressedBytes(int.MaxValue, int.MaxValue, 4, out _));
         Assert.IsFalse(ImageSizeGuard.IsWithinBudget(20000, 20000));
         Assert.IsTrue(ImageSizeGuard.IsWithinBudget(100, 100));
+    }
+}
+
+[TestClass]
+public class ImageFileDetectorTests
+{
+    [TestMethod]
+    public void IsImageFilePath_RecognizesCommonExtensions()
+    {
+        Assert.IsTrue(ImageFileDetector.IsImageFilePath(@"C:\photos\shot.JPG"));
+        Assert.IsTrue(ImageFileDetector.IsImageFilePath(@"C:\a\b.webp"));
+        Assert.IsFalse(ImageFileDetector.IsImageFilePath(@"C:\docs\file.pdf"));
+        Assert.IsFalse(ImageFileDetector.IsImageFilePath(@"C:\docs\file"));
+    }
+
+    [TestMethod]
+    public void IsSingleExistingImageFile_RequiresExactlyOneExistingImage()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "ClipStackTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var jpg = Path.Combine(dir, "a.jpg");
+            var txt = Path.Combine(dir, "b.txt");
+            File.WriteAllBytes(jpg, [1, 2, 3]);
+            File.WriteAllText(txt, "x");
+
+            Assert.IsTrue(ImageFileDetector.IsSingleExistingImageFile([jpg]));
+            Assert.IsFalse(ImageFileDetector.IsSingleExistingImageFile([jpg, Path.Combine(dir, "c.png")]));
+            Assert.IsFalse(ImageFileDetector.IsSingleExistingImageFile([txt]));
+            Assert.IsFalse(ImageFileDetector.IsSingleExistingImageFile([]));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [TestMethod]
+    public void SafeOriginalFileName_UsesOriginalPrefix()
+    {
+        Assert.AreEqual("original.jpg", ImageFileDetector.SafeOriginalFileName(@"C:\x\photo.JPEG"));
+        Assert.AreEqual("original.png", ImageFileDetector.SafeOriginalFileName(@"C:\x\a.png"));
+        Assert.IsTrue(PayloadFileNames.IsOriginalImageFileName("original.webp"));
+        Assert.IsFalse(PayloadFileNames.IsOriginalImageFileName("image.png"));
+    }
+}
+
+[TestClass]
+public class ImageOriginalHashTests
+{
+    [TestMethod]
+    public void ComputeHash_Changes_WhenOriginalImageBytesChange()
+    {
+        var a = ContentHasher.ComputeHash([(ClipboardFormatKind.ImageOriginal, new byte[] { 1, 2, 3 })]);
+        var b = ContentHasher.ComputeHash([(ClipboardFormatKind.ImageOriginal, new byte[] { 1, 2, 4 })]);
+        Assert.AreNotEqual(a, b);
+    }
+
+    [TestMethod]
+    public void HistoryStore_PersistsOriginalImageRelativeFileName()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "ClipStackTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var store = new HistoryStore(new StoragePaths(root));
+            store.Initialize();
+
+            var bytes = new byte[] { 0xFF, 0xD8, 0xFF, 0x00 }; // not a real jpeg; storage only
+            var data = new NewClipboardItemData
+            {
+                DominantKind = ClipboardItemKind.Image,
+                ContentHash = ContentHasher.ComputeHash([(ClipboardFormatKind.ImageOriginal, bytes)]),
+                PreviewText = "photo.jpg",
+                ImageWidth = 10,
+                ImageHeight = 10,
+                FilePaths = [@"C:\photos\photo.jpg"],
+                Payloads =
+                [
+                    new PayloadWriteRequest
+                    {
+                        Format = ClipboardFormatKind.ImageOriginal,
+                        Bytes = bytes,
+                        RelativeFileName = "original.jpg",
+                    },
+                ],
+            };
+
+            var added = store.AddOrPromote(data, 10).Item;
+            var path = store.ResolvePayloadPath(added, added.Payloads[0]);
+            Assert.IsTrue(path.EndsWith("original.jpg", StringComparison.OrdinalIgnoreCase));
+            Assert.IsTrue(File.Exists(path));
+            CollectionAssert.AreEqual(bytes, File.ReadAllBytes(path));
+
+            var reloaded = new HistoryStore(new StoragePaths(root));
+            reloaded.Initialize();
+            Assert.AreEqual(1, reloaded.Items.Count);
+            Assert.AreEqual(ClipboardItemKind.Image, reloaded.Items[0].DominantKind);
+            Assert.IsTrue(reloaded.Items[0].Payloads.Any(p => p.Format == ClipboardFormatKind.ImageOriginal));
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
     }
 }

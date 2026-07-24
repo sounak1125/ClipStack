@@ -7,6 +7,7 @@ public enum ClipboardFormatKind
     Html,
     Rtf,
     ImagePng,
+    ImageOriginal,
     ThumbnailPng,
     FileDropList,
 }

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Windows;
 using System.Windows.Input;
 using ClipStack.Core;
+using MediaBrush = System.Windows.Media.Brush;
 using ClipStack.Core.Models;
 using ClipStack.Core.Settings;
 using ClipStack.Core.Storage;
@@ -19,6 +20,8 @@ public partial class SettingsWindow : Window
     private readonly Action _onSettingsChanged;
     private readonly Action _onClearHistory;
     private HotKeyConfiguration _draftHotKey;
+    private HotKeyConfiguration _shortcutBeforeRecording;
+    private bool _isRecordingShortcut;
 
     public SettingsWindow(
         SettingsStore settingsStore,
@@ -38,8 +41,10 @@ public partial class SettingsWindow : Window
         _onSettingsChanged = onSettingsChanged;
         _onClearHistory = onClearHistory;
         _draftHotKey = settingsStore.Current.HotKey.Clone();
+        _shortcutBeforeRecording = _draftHotKey.Clone();
         SettingsNavigation.SelectionChanged += OnSettingsNavigationChanged;
         SettingsNavigation.SelectedIndex = 0;
+        PreviewKeyDown += OnWindowPreviewKeyDown;
         LoadFromSettings();
         _updateService.StatusChanged += () => Dispatcher.Invoke(RefreshUpdateUi);
     }
@@ -60,29 +65,77 @@ public partial class SettingsWindow : Window
         CaptureEnabled.IsChecked = !s.PauseCapture;
         AutoUpdates.IsChecked = s.CheckForUpdatesAutomatically;
         _draftHotKey = s.HotKey.Clone();
-        CurrentShortcut.Text = $"Current: {_draftHotKey.ToDisplayString()}";
-        ShortcutRecorder.Text = _draftHotKey.ToDisplayString();
+        _isRecordingShortcut = false;
+        RefreshShortcutDisplay();
         ShortcutError.Text = string.Empty;
         DataFolderText.Text = AppIdentity.GetDataDirectory();
-        DiskUsageText.Text = $"History disk usage: {FormatBytes(_historyStore.CalculateDiskUsageBytes())}";
-        SidebarVersionText.Text = $"ClipStack {_updateService.CurrentVersion}";
+        DiskUsageText.Text = FormatBytes(_historyStore.CalculateDiskUsageBytes());
+        SidebarVersionText.Text = _updateService.CurrentVersion;
         RefreshUpdateUi();
     }
 
     private void RefreshUpdateUi()
     {
-        VersionText.Text = $"Current version: {_updateService.CurrentVersion}";
+        VersionText.Text = _updateService.CurrentVersion;
         FeedStatusText.Text = _updateService.FeedStatus;
-        UpdateStatusText.Text = $"Status: {_updateService.Status}";
+        UpdateStatusText.Text = _updateService.Status;
+    }
+
+    private void OnShortcutRecorderMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (!ShortcutRecorderHost.IsKeyboardFocused)
+            ShortcutRecorderHost.Focus();
+        e.Handled = true;
+    }
+
+    private void OnShortcutRecorderGotFocus(object sender, KeyboardFocusChangedEventArgs e)
+        => BeginShortcutRecording();
+
+    private void OnShortcutRecorderLostFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (!_isRecordingShortcut)
+            return;
+
+        // Keep whatever draft was captured; only Esc restores the prior value.
+        EndShortcutRecording(restorePrevious: false);
+    }
+
+    private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (!_isRecordingShortcut)
+            return;
+
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (key != Key.Escape)
+            return;
+
+        CancelShortcutRecording();
+        e.Handled = true;
     }
 
     private void OnShortcutPreviewKeyDown(object sender, KeyEventArgs e)
     {
-        e.Handled = true;
+        if (!_isRecordingShortcut)
+            return;
+
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
-        if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt
-            or Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin or Key.System)
+
+        // Let Tab move focus out of the recorder (LostFocus ends recording).
+        if (key == Key.Tab)
+            return;
+
+        e.Handled = true;
+
+        if (key == Key.Escape)
         {
+            CancelShortcutRecording();
+            return;
+        }
+
+        if (IsModifierKey(key))
+        {
+            ShowRecordingDraft(FormatModifierPreview(Keyboard.Modifiers));
+            ShortcutError.Text = string.Empty;
             return;
         }
 
@@ -93,25 +146,111 @@ public partial class SettingsWindow : Window
             Alt = mods.HasFlag(ModifierKeys.Alt),
             Shift = mods.HasFlag(ModifierKeys.Shift),
             Win = mods.HasFlag(ModifierKeys.Windows),
-            VirtualKey = System.Windows.Input.KeyInterop.VirtualKeyFromKey(key),
+            VirtualKey = KeyInterop.VirtualKeyFromKey(key),
         };
 
         if (!draft.IsValid)
         {
-            ShortcutError.Text = "Shortcut must include at least one modifier and a key.";
+            ShowRecordingDraft("Press new shortcut…");
+            ShortcutError.Text = "Need a modifier + key.";
             return;
         }
 
         _draftHotKey = draft;
-        ShortcutRecorder.Text = draft.ToDisplayString();
+        ShowRecordingDraft(draft.ToDisplayString(), muted: false);
+        ShortcutHint.Text = "Press another shortcut, Apply to save, or Esc to cancel.";
         ShortcutError.Text = string.Empty;
+    }
+
+    private void OnShortcutPreviewKeyUp(object sender, KeyEventArgs e)
+    {
+        if (!_isRecordingShortcut)
+            return;
+
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (!IsModifierKey(key))
+            return;
+
+        // Refresh modifier preview while waiting for a non-modifier key.
+        if (ShortcutRecorderText.Text.EndsWith("…", StringComparison.Ordinal))
+            ShowRecordingDraft(FormatModifierPreview(Keyboard.Modifiers));
+    }
+
+    private void BeginShortcutRecording()
+    {
+        if (_isRecordingShortcut)
+            return;
+
+        _isRecordingShortcut = true;
+        _shortcutBeforeRecording = _draftHotKey.Clone();
+        ShortcutError.Text = string.Empty;
+        ShowRecordingDraft("Press new shortcut…");
+        ShortcutHint.Text = "Recording… Esc cancels.";
+        ShortcutRecorderHost.BorderBrush = (MediaBrush)FindResource("AccentBrush");
+        ShortcutRecorderHost.Background = (MediaBrush)FindResource("HoverBrush");
+    }
+
+    private void CancelShortcutRecording()
+    {
+        if (!_isRecordingShortcut)
+            return;
+
+        _draftHotKey = _shortcutBeforeRecording.Clone();
+        EndShortcutRecording(restorePrevious: false);
+        // Move focus away so we don't immediately re-enter recording via GotFocus.
+        MoveFocus(new TraversalRequest(FocusNavigationDirection.Next));
+    }
+
+    private void EndShortcutRecording(bool restorePrevious)
+    {
+        if (!_isRecordingShortcut)
+            return;
+
+        if (restorePrevious)
+            _draftHotKey = _shortcutBeforeRecording.Clone();
+
+        _isRecordingShortcut = false;
+        RefreshShortcutDisplay();
+    }
+
+    private void RefreshShortcutDisplay()
+    {
+        ShortcutRecorderText.Text = _draftHotKey.ToDisplayString();
+        ShortcutRecorderText.Foreground = (MediaBrush)FindResource("TextBrush");
+        ShortcutRecorderHost.BorderBrush = (MediaBrush)FindResource("BorderBrush");
+        ShortcutRecorderHost.Background = (MediaBrush)FindResource("SurfaceBrush");
+        ShortcutHint.Text = "Click the field, then press a new shortcut.";
+    }
+
+    private void ShowRecordingDraft(string text, bool muted = true)
+    {
+        ShortcutRecorderText.Text = text;
+        ShortcutRecorderText.Foreground = (MediaBrush)FindResource(muted ? "MutedBrush" : "TextBrush");
+    }
+
+    private static bool IsModifierKey(Key key) =>
+        key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt
+            or Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin or Key.System;
+
+    private static string FormatModifierPreview(ModifierKeys mods)
+    {
+        var parts = new List<string>(4);
+        if (mods.HasFlag(ModifierKeys.Control)) parts.Add("Ctrl");
+        if (mods.HasFlag(ModifierKeys.Alt)) parts.Add("Alt");
+        if (mods.HasFlag(ModifierKeys.Shift)) parts.Add("Shift");
+        if (mods.HasFlag(ModifierKeys.Windows)) parts.Add("Win");
+        return parts.Count == 0 ? "Press new shortcut…" : string.Join(" + ", parts) + " + …";
     }
 
     private void OnApplyShortcut(object sender, RoutedEventArgs e)
     {
+        if (_isRecordingShortcut)
+            EndShortcutRecording(restorePrevious: false);
+
         if (!_draftHotKey.IsValid)
         {
             ShortcutError.Text = "Invalid shortcut.";
+            RefreshShortcutDisplay();
             return;
         }
 
@@ -119,23 +258,25 @@ public partial class SettingsWindow : Window
         if (!_tryRegisterHotKey(_draftHotKey))
         {
             _tryRegisterHotKey(previous);
-            ShortcutError.Text = "That shortcut is already in use. Previous shortcut restored.";
+            ShortcutError.Text = "Shortcut in use.";
             _draftHotKey = previous;
-            ShortcutRecorder.Text = previous.ToDisplayString();
-            CurrentShortcut.Text = $"Current: {previous.ToDisplayString()}";
+            RefreshShortcutDisplay();
             return;
         }
 
         _settingsStore.Update(s => s.HotKey = _draftHotKey.Clone());
-        CurrentShortcut.Text = $"Current: {_draftHotKey.ToDisplayString()}";
+        RefreshShortcutDisplay();
         ShortcutError.Text = string.Empty;
         _onSettingsChanged();
     }
 
     private void OnRestoreDefaultShortcut(object sender, RoutedEventArgs e)
     {
+        if (_isRecordingShortcut)
+            EndShortcutRecording(restorePrevious: false);
+
         _draftHotKey = HotKeyConfiguration.Default.Clone();
-        ShortcutRecorder.Text = _draftHotKey.ToDisplayString();
+        RefreshShortcutDisplay();
         OnApplyShortcut(sender, e);
     }
 
@@ -159,22 +300,49 @@ public partial class SettingsWindow : Window
 
     private void OnClearHistory(object sender, RoutedEventArgs e)
     {
-        var result = MessageBox.Show(this, "Clear all clipboard history?", AppIdentity.ProductName,
-            MessageBoxButton.YesNo, MessageBoxImage.Question);
-        if (result == MessageBoxResult.Yes)
+        if (ConfirmDialog.Confirm(this, "Clear history?", confirmText: "Clear", danger: true))
             _onClearHistory();
-        DiskUsageText.Text = $"History disk usage: {FormatBytes(_historyStore.CalculateDiskUsageBytes())}";
+        DiskUsageText.Text = FormatBytes(_historyStore.CalculateDiskUsageBytes());
+    }
+
+    private void OnHistoryLimitLostFocus(object sender, RoutedEventArgs e) =>
+        ClampHistoryLimitTextBox();
+
+    private void ClampHistoryLimitTextBox()
+    {
+        if (!int.TryParse(HistoryLimit.Text, out var limit))
+            return;
+
+        if (limit > AppSettings.MaxHistoryLimit)
+        {
+            HistoryLimit.Text = AppSettings.MaxHistoryLimit.ToString();
+            return;
+        }
+
+        if (limit < AppSettings.MinHistoryLimit)
+            HistoryLimit.Text = AppSettings.MinHistoryLimit.ToString();
     }
 
     private void OnSave(object sender, RoutedEventArgs e)
     {
+        ClampHistoryLimitTextBox();
         if (!int.TryParse(HistoryLimit.Text, out var limit))
             limit = AppSettings.DefaultHistoryLimit;
+        if (limit > AppSettings.MaxHistoryLimit)
+            limit = AppSettings.MaxHistoryLimit;
+        if (limit < AppSettings.MinHistoryLimit)
+            limit = AppSettings.MinHistoryLimit;
+
         if (!double.TryParse(MaxSizeMb.Text, out var mb))
             mb = AppSettings.DefaultMaxItemSizeBytes / (1024.0 * 1024.0);
 
         var wantStartup = StartWithWindows.IsChecked == true;
-        _startupService.SetEnabled(wantStartup);
+        if (!_startupService.SetEnabled(wantStartup))
+        {
+            wantStartup = _startupService.IsEnabled();
+            StartWithWindows.IsChecked = wantStartup;
+            ConfirmDialog.Alert(this, "Couldn't update", "Start with Windows setting failed.");
+        }
 
         _settingsStore.Update(s =>
         {

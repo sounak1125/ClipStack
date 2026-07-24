@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using ClipStack.Core.Models;
+using ClipStack.Core.Utilities;
 
 namespace ClipStack.Core.Storage;
 
@@ -41,6 +42,7 @@ public static class PayloadFileNames
     public const string Html = "content.html";
     public const string Rtf = "content.rtf";
     public const string Image = "image.png";
+    public const string ImageOriginalPrefix = "original";
     public const string Thumbnail = "thumbnail.png";
     public const string Files = "files.json";
 
@@ -50,10 +52,20 @@ public static class PayloadFileNames
         ClipboardFormatKind.Html => Html,
         ClipboardFormatKind.Rtf => Rtf,
         ClipboardFormatKind.ImagePng => Image,
+        ClipboardFormatKind.ImageOriginal => "original.bin", // overridden by RelativeFileName when writing
         ClipboardFormatKind.ThumbnailPng => Thumbnail,
         ClipboardFormatKind.FileDropList => Files,
         _ => throw new ArgumentOutOfRangeException(nameof(format)),
     };
+
+    public static bool IsOriginalImageFileName(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+            return false;
+
+        return fileName.StartsWith(ImageOriginalPrefix + ".", StringComparison.OrdinalIgnoreCase)
+               && ImageFileDetector.IsImageFilePath(fileName);
+    }
 }
 
 public sealed class NewClipboardItemData

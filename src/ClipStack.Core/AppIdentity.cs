@@ -12,7 +12,7 @@ public static class AppIdentity
     public const string ExecutableName = "ClipStack.exe";
     public const string ApplicationId = "ClipStack.Desktop";
     public const string Publisher = "ClipStack";
-    public const string DefaultVersion = "0.1.0";
+    public const string DefaultVersion = "1.0.1";
     public const string DataFolderName = "ClipStack";
     public const string StartupRegistryValueName = "ClipStack";
     public const string MutexNamePrefix = "Local\\ClipStack.Desktop.SingleInstance";

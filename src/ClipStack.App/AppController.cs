@@ -145,10 +145,12 @@ internal sealed class AppController : IDisposable
 
     private void OnSettingsChanged()
     {
+        var settings = _settings.Current;
+        _history.TrimToLimit(settings.HistoryLimit);
         _tray.RefreshMenuState();
         if (_popup.IsVisible)
             RefreshPopup();
-        if (_settings.Current.CheckForUpdatesAutomatically)
+        if (settings.CheckForUpdatesAutomatically)
             _ = _updates.CheckAutomaticallyIfDueAsync(_lifetimeCts.Token);
     }
 
@@ -166,7 +168,7 @@ internal sealed class AppController : IDisposable
         RefreshPopup();
 
         _popup.Width = 408;
-        _popup.Height = Math.Min(520, Math.Max(182, 100 + (_popupVm.Items.Count * 62)));
+        _popup.Height = 360;
         _popup.Topmost = true;
         _popup.Opacity = 0;
         _popup.Show();
@@ -334,31 +336,18 @@ internal sealed class AppController : IDisposable
 
     private void ApplyTheme(string theme)
     {
-        var useDark = theme.Equals("Dark", StringComparison.OrdinalIgnoreCase)
-            || (theme.Equals("System", StringComparison.OrdinalIgnoreCase) && IsSystemDark());
+        // Default and System map to Dark for the minimal dark UI.
+        // Explicit "Light" still loads the light dictionary.
+        var useLight = theme.Equals("Light", StringComparison.OrdinalIgnoreCase);
 
         var dict = new ResourceDictionary
         {
-            Source = new Uri(useDark ? "Themes/Dark.xaml" : "Themes/Light.xaml", UriKind.Relative),
+            Source = new Uri(useLight ? "Themes/Light.xaml" : "Themes/Dark.xaml", UriKind.Relative),
         };
 
         var app = Application.Current;
         app.Resources.MergedDictionaries.Clear();
         app.Resources.MergedDictionaries.Add(dict);
-    }
-
-    private static bool IsSystemDark()
-    {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-            var value = key?.GetValue("AppsUseLightTheme");
-            return value is int i && i == 0;
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     public void Dispose()

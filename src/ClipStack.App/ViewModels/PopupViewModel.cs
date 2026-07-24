@@ -50,9 +50,8 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
             return Item.DominantKind switch
             {
                 ClipboardItemKind.Image => $"{Item.ImageWidth}×{Item.ImageHeight} · {FormatSize(Item.TotalSizeBytes)}",
-                ClipboardItemKind.Files => $"{Item.FileCount} item(s)",
-                ClipboardItemKind.RichText => $"{Item.CharacterCount:N0} chars · Rich text",
-                ClipboardItemKind.Text => $"{Item.CharacterCount:N0} chars",
+                ClipboardItemKind.Files => $"{Item.FileCount} files",
+                ClipboardItemKind.RichText or ClipboardItemKind.Text => $"{Item.CharacterCount:N0} chars",
                 _ => FormatSize(Item.TotalSizeBytes),
             };
         }
@@ -190,7 +189,7 @@ public sealed class PopupViewModel : INotifyPropertyChanged
     {
         IsPaused = isPaused;
         var source = _history.Items.Take(limit).ToList();
-        HeaderCount = source.Count == 1 ? "1 item" : $"{source.Count} items";
+        HeaderCount = source.Count.ToString();
 
         // Incremental update by id order
         for (var i = 0; i < source.Count; i++)

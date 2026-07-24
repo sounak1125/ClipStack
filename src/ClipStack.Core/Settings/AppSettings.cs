@@ -3,8 +3,8 @@ namespace ClipStack.Core.Settings;
 public sealed class AppSettings
 {
     public const int MinHistoryLimit = 1;
-    public const int MaxHistoryLimit = 50;
-    public const int DefaultHistoryLimit = 10;
+    public const int MaxHistoryLimit = 20;
+    public const int DefaultHistoryLimit = 20;
     public const long DefaultMaxItemSizeBytes = 128L * 1024 * 1024;
 
     public bool StartWithWindows { get; set; }
@@ -36,7 +36,7 @@ public sealed class AppSettings
 
     public DateTimeOffset? LastAutomaticUpdateCheckUtc { get; set; }
 
-    public string Theme { get; set; } = "System";
+    public string Theme { get; set; } = "Dark";
 
     public AppSettings Clone() => new()
     {

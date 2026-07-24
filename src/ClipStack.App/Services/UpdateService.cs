@@ -4,6 +4,7 @@ using ClipStack.Core.Settings;
 using ClipStack.Core.Storage;
 using ClipStack.Core.Utilities;
 using Velopack;
+using Velopack.Exceptions;
 using Velopack.Sources;
 
 namespace ClipStack.Services;
@@ -60,7 +61,7 @@ public sealed class UpdateService
 
     public bool IsFeedConfigured => _release.IsConfigured;
 
-    public string FeedStatus => _release.IsConfigured ? "Update feed configured." : "Update feed not configured.";
+    public string FeedStatus => _release.IsConfigured ? "Feed configured" : "No feed";
 
     public void ReloadConfiguration()
     {
@@ -91,7 +92,7 @@ public sealed class UpdateService
         catch (Exception ex)
         {
             _logger.Error("UpdateManagerCreate", ex);
-            Status = "Updater unavailable.";
+            Status = "Unavailable";
         }
     }
 
@@ -119,6 +120,10 @@ public sealed class UpdateService
         if (!settings.CheckForUpdatesAutomatically || !_release.AutomaticChecks || !_release.IsConfigured)
             return;
 
+        // Don't burn the 24h cooldown while running unpackaged (dev/publish folder).
+        if (_manager is null || !_manager.IsInstalled)
+            return;
+
         if (settings.LastAutomaticUpdateCheckUtc is { } last
             && DateTimeOffset.UtcNow - last < TimeSpan.FromHours(24))
         {
@@ -133,50 +138,63 @@ public sealed class UpdateService
     {
         if (!_release.IsConfigured)
         {
-            Status = "Update feed not configured.";
+            Status = "No feed";
             return;
         }
 
         if (_manager is null)
         {
-            Status = "Updater unavailable (development / unpackaged).";
+            Status = "Unavailable";
+            return;
+        }
+
+        // Velopack only supports update checks from a real install (Setup/portable pack).
+        // Unpackaged debug/publish runs throw NotInstalledException — not a feed failure.
+        if (!_manager.IsInstalled)
+        {
+            Status = "Not installed";
             return;
         }
 
         if (Interlocked.Exchange(ref _checkRunning, 1) != 0)
         {
             if (manual)
-                Status = "An update check is already running.";
+                Status = "Busy";
             return;
         }
 
         try
         {
-            Status = "Checking for updates…";
+            Status = "Checking…";
             var update = await _manager.CheckForUpdatesAsync().ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
 
             if (update is null)
             {
-                Status = "You're up to date.";
+                Status = "Up to date";
                 return;
             }
 
-            Status = $"Update {update.TargetFullRelease.Version} available — downloading…";
+            Status = $"Downloading {update.TargetFullRelease.Version}…";
             await _manager.DownloadUpdatesAsync(update).ConfigureAwait(true);
             _pending = update;
-            Status = $"Update {update.TargetFullRelease.Version} ready.";
+            Status = $"{update.TargetFullRelease.Version} ready";
             UpdateReady?.Invoke(update.TargetFullRelease.Version.ToString());
+        }
+        catch (NotInstalledException ex)
+        {
+            _logger.Warn("UpdateCheckNotInstalled", ex.Message);
+            Status = "Not installed";
         }
         catch (NotSupportedException ex)
         {
-            _logger.Error("UpdateCheckNotInstalled", ex);
-            Status = "Updater unavailable (development / unpackaged).";
+            _logger.Warn("UpdateCheckNotSupported", ex.Message);
+            Status = "Unavailable";
         }
         catch (Exception ex)
         {
             _logger.Error("UpdateCheck", ex);
-            Status = manual ? "Update check failed." : "Update check failed (ignored).";
+            Status = "Check failed";
         }
         finally
         {
@@ -195,7 +213,7 @@ public sealed class UpdateService
         catch (Exception ex)
         {
             _logger.Error("ApplyUpdate", ex);
-            Status = "Could not apply update.";
+            Status = "Apply failed";
         }
     }
 

@@ -5,16 +5,16 @@
         Title="ClipStack"
         Icon="/ClipStack;component/Assets/clipstack.ico"
         Width="408"
-        Height="520"
-        MinHeight="182"
+        Height="360"
+        MinHeight="200"
         WindowStyle="None"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
         Topmost="True"
-        AllowsTransparency="True"
-        Background="Transparent"
-        FontFamily="Segoe UI Variable Text, Segoe UI"
-        FontSize="13"
+        AllowsTransparency="False"
+        Background="{DynamicResource BgBrush}"
+        FontFamily="Segoe UI"
+        FontSize="14"
         SnapsToDevicePixels="True"
         UseLayoutRounding="True"
         TextOptions.TextFormattingMode="Display"
@@ -23,19 +23,16 @@
         AutomationProperties.Name="ClipStack clipboard history">
   <Window.Resources>
     <conv:BoolToVisibilityConverter x:Key="BoolToVis" />
-    <conv:KindToGlyphConverter x:Key="KindGlyph" />
-    <conv:KindToBrushConverter x:Key="KindBrush" />
 
     <Style x:Key="HeaderButton" TargetType="Button">
       <Setter Property="Width" Value="28" />
       <Setter Property="Height" Value="28" />
-      <Setter Property="Margin" Value="3,0,0,0" />
+      <Setter Property="Margin" Value="2,0,0,0" />
       <Setter Property="Padding" Value="0" />
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
       <Setter Property="Cursor" Value="Hand" />
-      <Setter Property="FontFamily" Value="Segoe UI Symbol" />
       <Setter Property="FontSize" Value="14" />
       <Setter Property="FocusVisualStyle" Value="{x:Null}" />
       <Setter Property="Template">
@@ -43,7 +40,7 @@
           <ControlTemplate TargetType="Button">
             <Border x:Name="Surface"
                     Background="{TemplateBinding Background}"
-                    CornerRadius="4">
+                    CornerRadius="2">
               <ContentPresenter HorizontalAlignment="Center"
                                 VerticalAlignment="Center" />
             </Border>
@@ -77,22 +74,22 @@
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Thumb">
-            <Border Margin="2,1"
+            <Border Margin="1,1"
                     CornerRadius="2"
                     Background="{DynamicResource MutedBrush}"
-                    Opacity="0.4" />
+                    Opacity="0.35" />
           </ControlTemplate>
         </Setter.Value>
       </Setter>
     </Style>
 
     <Style TargetType="ScrollBar">
-      <Setter Property="Width" Value="7" />
+      <Setter Property="Width" Value="5" />
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ScrollBar">
-            <Grid Width="7" Background="Transparent">
+            <Grid Width="5" Background="Transparent">
               <Track x:Name="PART_Track"
                      IsDirectionReversed="True"
                      Focusable="False">
@@ -115,241 +112,162 @@
     </Style>
   </Window.Resources>
 
-  <Grid Margin="10">
-    <Border CornerRadius="7"
-            BorderBrush="{DynamicResource BorderBrush}"
-            BorderThickness="1"
-            Background="{DynamicResource BgBrush}">
-      <Border.Effect>
-        <DropShadowEffect BlurRadius="18"
-                          Direction="270"
-                          ShadowDepth="5"
-                          Opacity="0.28"
-                          Color="#FF000000" />
-      </Border.Effect>
+  <Border BorderBrush="{DynamicResource BorderBrush}"
+          BorderThickness="1"
+          Background="{DynamicResource BgBrush}">
+    <Grid>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="36" />
+        <RowDefinition Height="*" />
+      </Grid.RowDefinitions>
 
-      <Grid>
-        <Grid.RowDefinitions>
-          <RowDefinition Height="50" />
-          <RowDefinition Height="*" />
-          <RowDefinition Height="30" />
-        </Grid.RowDefinitions>
+      <!-- Header -->
+      <Border Grid.Row="0"
+              Background="{DynamicResource HeaderBrush}"
+              BorderBrush="{DynamicResource BorderBrush}"
+              BorderThickness="0,0,0,1"
+              Padding="10,0">
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
 
-        <Border Grid.Row="0"
-                Background="{DynamicResource HeaderBrush}"
-                CornerRadius="6,6,0,0"
-                BorderBrush="{DynamicResource BorderBrush}"
-                BorderThickness="0,0,0,1"
-                Padding="13,0">
-          <Grid>
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="Auto" />
-              <ColumnDefinition Width="*" />
-              <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-
-            <Border Width="4"
-                    Height="20"
-                    Margin="0,0,10,0"
-                    CornerRadius="1"
-                    Background="{DynamicResource AccentBrush}" />
-
-            <StackPanel Grid.Column="1"
-                        Orientation="Horizontal"
-                        VerticalAlignment="Center">
-              <TextBlock Text="CLIPBOARD"
-                         FontSize="12"
-                         FontWeight="Bold"
-                         Foreground="{DynamicResource TextBrush}" />
-              <TextBlock Text="{Binding HeaderCount}"
-                         Margin="9,0,0,0"
-                         FontSize="11"
-                         Foreground="{DynamicResource MutedBrush}" />
-              <TextBlock Text="PAUSED"
-                         Margin="9,0,0,0"
-                         FontSize="10"
-                         FontWeight="Bold"
-                         Foreground="{DynamicResource AccentBrush}"
-                         Visibility="{Binding IsPaused, Converter={StaticResource BoolToVis}}" />
-            </StackPanel>
-
-            <StackPanel Grid.Column="2"
-                        Orientation="Horizontal"
-                        VerticalAlignment="Center">
-              <Button Style="{StaticResource HeaderButton}"
-                      Content="⚙"
-                      ToolTip="Settings"
-                      Click="OnSettingsClick"
-                      AutomationProperties.Name="Open settings" />
-              <Button Style="{StaticResource HeaderButton}"
-                      Content="×"
-                      ToolTip="Close"
-                      Click="OnCloseClick"
-                      AutomationProperties.Name="Close" />
-            </StackPanel>
-          </Grid>
-        </Border>
-
-        <Grid Grid.Row="1">
-          <ListBox x:Name="HistoryList"
-                   ItemsSource="{Binding Items}"
-                   SelectedItem="{Binding SelectedItem, Mode=TwoWay}"
-                   Padding="7,5"
-                   BorderThickness="0"
-                   Background="Transparent"
-                   ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                   ScrollViewer.VerticalScrollBarVisibility="Auto"
-                   ScrollViewer.CanContentScroll="True"
-                   VirtualizingPanel.IsVirtualizing="True"
-                   VirtualizingPanel.VirtualizationMode="Recycling"
-                   PreviewMouseLeftButtonUp="OnItemClick"
-                   AutomationProperties.Name="Clipboard history list">
-            <ListBox.ItemContainerStyle>
-              <Style TargetType="ListBoxItem">
-                <Setter Property="Padding" Value="0" />
-                <Setter Property="Margin" Value="0" />
-                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                <Setter Property="FocusVisualStyle" Value="{x:Null}" />
-                <Setter Property="Template">
-                  <Setter.Value>
-                    <ControlTemplate TargetType="ListBoxItem">
-                      <Border x:Name="RowSurface"
-                              MinHeight="56"
-                              Margin="0,0,0,1"
-                              Padding="9,7"
-                              CornerRadius="4"
-                              Background="Transparent"
-                              BorderBrush="Transparent"
-                              BorderThickness="1">
-                        <ContentPresenter />
-                      </Border>
-                      <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True">
-                          <Setter TargetName="RowSurface" Property="Background" Value="{DynamicResource HoverBrush}" />
-                        </Trigger>
-                        <Trigger Property="IsSelected" Value="True">
-                          <Setter TargetName="RowSurface" Property="Background" Value="{DynamicResource SelectedBrush}" />
-                          <Setter TargetName="RowSurface" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
-                        </Trigger>
-                      </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                  </Setter.Value>
-                </Setter>
-              </Style>
-            </ListBox.ItemContainerStyle>
-
-            <ListBox.ItemTemplate>
-              <DataTemplate>
-                <Grid>
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="5" />
-                    <ColumnDefinition Width="30" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="46" />
-                  </Grid.ColumnDefinitions>
-
-                  <Border Width="3"
-                          Margin="0,2,0,2"
-                          HorizontalAlignment="Left"
-                          CornerRadius="1"
-                          Background="{Binding Kind, Converter={StaticResource KindBrush}}" />
-
-                  <TextBlock Grid.Column="1"
-                             Text="{Binding Kind, Converter={StaticResource KindGlyph}}"
-                             FontSize="13"
-                             FontWeight="SemiBold"
-                             Foreground="{Binding Kind, Converter={StaticResource KindBrush}}"
-                             VerticalAlignment="Top"
-                             Margin="6,2,0,0" />
-
-                  <Border Grid.Column="2"
-                          Width="52"
-                          Height="40"
-                          Margin="0,0,9,0"
-                          CornerRadius="3"
-                          Background="{DynamicResource SurfaceBrush}"
-                          ClipToBounds="True"
-                          Visibility="{Binding ShowThumbnail, Converter={StaticResource BoolToVis}}">
-                    <Image Stretch="UniformToFill"
-                           Source="{Binding Thumbnail}" />
-                  </Border>
-
-                  <StackPanel Grid.Column="3"
-                              VerticalAlignment="Center"
-                              Margin="0,0,8,0">
-                    <TextBlock Text="{Binding PreviewText}"
-                               FontFamily="Cascadia Mono, Consolas"
-                               FontSize="12"
-                               TextWrapping="NoWrap"
-                               TextTrimming="CharacterEllipsis"
-                               Foreground="{DynamicResource TextBrush}" />
-                    <TextBlock Text="{Binding MetaText}"
-                               Margin="0,4,0,0"
-                               FontSize="10.5"
-                               Foreground="{DynamicResource MutedBrush}" />
-                  </StackPanel>
-
-                  <Grid Grid.Column="4">
-                    <Border Width="25"
-                            Height="22"
-                            HorizontalAlignment="Right"
-                            VerticalAlignment="Top"
-                            CornerRadius="3"
-                            Background="{DynamicResource SurfaceBrush}"
-                            BorderBrush="{DynamicResource BorderBrush}"
-                            BorderThickness="1">
-                      <TextBlock Text="{Binding ShortcutLabel}"
-                                 HorizontalAlignment="Center"
-                                 VerticalAlignment="Center"
-                                 FontFamily="Cascadia Mono, Consolas"
-                                 FontSize="10.5"
-                                 FontWeight="SemiBold"
-                                 Foreground="{DynamicResource TextBrush}" />
-                    </Border>
-                    <TextBlock Text="{Binding TimeText}"
-                               HorizontalAlignment="Right"
-                               VerticalAlignment="Bottom"
-                               FontSize="9.5"
-                               Foreground="{DynamicResource MutedBrush}" />
-                  </Grid>
-                </Grid>
-              </DataTemplate>
-            </ListBox.ItemTemplate>
-          </ListBox>
-
-          <StackPanel HorizontalAlignment="Center"
-                      VerticalAlignment="Center"
-                      IsHitTestVisible="False"
-                      Visibility="{Binding HasItems, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}">
-            <TextBlock Text="NO CLIPS YET"
-                       FontFamily="Cascadia Mono, Consolas"
+          <StackPanel Grid.Column="0"
+                      Orientation="Horizontal"
+                      VerticalAlignment="Center">
+            <TextBlock Text="ClipStack"
                        FontSize="12"
-                       FontWeight="Bold"
-                       Foreground="{DynamicResource TextBrush}"
-                       HorizontalAlignment="Center" />
-            <TextBlock Text="Copy text, an image, or a file."
-                       Margin="0,7,0,0"
+                       FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextBrush}" />
+            <TextBlock Text="{Binding HeaderCount}"
+                       Margin="8,0,0,0"
+                       FontSize="11"
+                       Foreground="{DynamicResource MutedBrush}" />
+            <TextBlock Text="Paused"
+                       Margin="8,0,0,0"
                        FontSize="11"
                        Foreground="{DynamicResource MutedBrush}"
-                       HorizontalAlignment="Center" />
+                       Visibility="{Binding IsPaused, Converter={StaticResource BoolToVis}}" />
+          </StackPanel>
+
+          <StackPanel Grid.Column="1"
+                      Orientation="Horizontal"
+                      VerticalAlignment="Center">
+            <Button Style="{StaticResource HeaderButton}"
+                    Content="⚙"
+                    ToolTip="Settings"
+                    Click="OnSettingsClick"
+                    AutomationProperties.Name="Open settings" />
+            <Button Style="{StaticResource HeaderButton}"
+                    Content="×"
+                    ToolTip="Close"
+                    Click="OnCloseClick"
+                    AutomationProperties.Name="Close" />
           </StackPanel>
         </Grid>
+      </Border>
 
-        <Grid Grid.Row="2" Margin="13,0">
-          <TextBlock Text="↑↓ navigate  ·  Enter paste  ·  Del remove"
-                     VerticalAlignment="Center"
-                     FontFamily="Cascadia Mono, Consolas"
-                     FontSize="9.5"
-                     Foreground="{DynamicResource MutedBrush}" />
-          <TextBlock Text="ESC"
-                     HorizontalAlignment="Right"
-                     VerticalAlignment="Center"
-                     FontFamily="Cascadia Mono, Consolas"
-                     FontSize="9.5"
-                     Foreground="{DynamicResource MutedBrush}" />
-        </Grid>
+      <!-- List -->
+      <Grid Grid.Row="1">
+        <ListBox x:Name="HistoryList"
+                 ItemsSource="{Binding Items}"
+                 SelectedItem="{Binding SelectedItem, Mode=TwoWay}"
+                 Padding="4,2"
+                 BorderThickness="0"
+                 Background="Transparent"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                 ScrollViewer.CanContentScroll="True"
+                 VirtualizingPanel.IsVirtualizing="True"
+                 VirtualizingPanel.VirtualizationMode="Recycling"
+                 PreviewMouseLeftButtonUp="OnItemClick"
+                 AutomationProperties.Name="Clipboard history list">
+          <ListBox.ItemContainerStyle>
+            <Style TargetType="ListBoxItem">
+              <Setter Property="Padding" Value="0" />
+              <Setter Property="Margin" Value="0" />
+              <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+              <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+              <Setter Property="Template">
+                <Setter.Value>
+                  <ControlTemplate TargetType="ListBoxItem">
+                    <Border x:Name="RowSurface"
+                            MinHeight="76"
+                            Margin="0"
+                            Padding="10,10"
+                            Background="Transparent"
+                            BorderBrush="Transparent"
+                            BorderThickness="0">
+                      <ContentPresenter />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                      <Trigger Property="IsMouseOver" Value="True">
+                        <Setter TargetName="RowSurface" Property="Background" Value="{DynamicResource HoverBrush}" />
+                      </Trigger>
+                      <Trigger Property="IsSelected" Value="True">
+                        <Setter TargetName="RowSurface" Property="Background" Value="{DynamicResource SelectedBrush}" />
+                      </Trigger>
+                    </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                </Setter.Value>
+              </Setter>
+            </Style>
+          </ListBox.ItemContainerStyle>
+
+          <ListBox.ItemTemplate>
+            <DataTemplate>
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto" />
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <Border Width="44"
+                        Height="44"
+                        Margin="0,0,10,0"
+                        VerticalAlignment="Center"
+                        Background="{DynamicResource SurfaceBrush}"
+                        ClipToBounds="True"
+                        Visibility="{Binding ShowThumbnail, Converter={StaticResource BoolToVis}}">
+                  <Image Stretch="UniformToFill"
+                         Source="{Binding Thumbnail}" />
+                </Border>
+
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                  <TextBlock Text="{Binding PreviewText}"
+                             FontSize="14"
+                             LineHeight="20"
+                             MaxHeight="40"
+                             TextWrapping="Wrap"
+                             TextTrimming="CharacterEllipsis"
+                             Foreground="{DynamicResource TextBrush}" />
+                  <TextBlock Text="{Binding TimeText}"
+                             Margin="0,4,0,0"
+                             FontSize="11"
+                             Foreground="{DynamicResource MutedBrush}" />
+                </StackPanel>
+
+                <TextBlock Grid.Column="2"
+                           Text="{Binding ShortcutLabel}"
+                           VerticalAlignment="Center"
+                           Margin="10,0,0,0"
+                           FontSize="12"
+                           Foreground="{DynamicResource MutedBrush}" />
+              </Grid>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+
+        <TextBlock Text="No clips"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center"
+                   FontSize="12"
+                   Foreground="{DynamicResource MutedBrush}"
+                   IsHitTestVisible="False"
+                   Visibility="{Binding HasItems, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}" />
       </Grid>
-    </Border>
-  </Grid>
+    </Grid>
+  </Border>
 </Window>

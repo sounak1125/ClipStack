@@ -71,16 +71,18 @@ internal sealed class ClipboardFormatReader
 
     private NewClipboardItemData? CaptureFromDataObject(IDataObject data, AppSettings settings)
     {
-        var payloads = new List<(ClipboardFormatKind Format, byte[] Bytes)>();
+        var payloads = new List<(ClipboardFormatKind Format, byte[] Bytes, string? RelativeFileName)>();
         string? text = null;
         string? html = null;
         string? rtf = null;
+        byte[]? clipboardPng = null;
         BitmapSource? image = null;
         StringCollection? files = null;
 
+        // Read FileDrop when capturing files OR images (HQ Explorer image path).
         try
         {
-            if (settings.CaptureFiles && data.GetDataPresent(DataFormats.FileDrop))
+            if ((settings.CaptureFiles || settings.CaptureImages) && data.GetDataPresent(DataFormats.FileDrop))
             {
                 if (data.GetData(DataFormats.FileDrop) is string[] arr)
                 {
@@ -93,10 +95,14 @@ internal sealed class ClipboardFormatReader
 
         try
         {
-            if (settings.CaptureImages && data.GetDataPresent(DataFormats.Bitmap))
+            if (settings.CaptureImages)
             {
-                if (data.GetData(DataFormats.Bitmap) is BitmapSource bmp)
+                clipboardPng = ThumbnailService.TryReadClipboardPng(data);
+                if (clipboardPng is null && data.GetDataPresent(DataFormats.Bitmap)
+                    && data.GetData(DataFormats.Bitmap) is BitmapSource bmp)
+                {
                     image = ThumbnailService.ToFrozenBitmapSource(bmp);
+                }
             }
         }
         catch (Exception ex) { _logger.Error("ReadBitmap", ex); }
@@ -127,15 +133,26 @@ internal sealed class ClipboardFormatReader
             catch (Exception ex) { _logger.Error("ReadRtf", ex); }
         }
 
-        // Prefer files if present as dominant, else image, else rich/text
         if (files is { Count: > 0 })
         {
             var paths = ContentHasher.NormalizeFilePaths(files.Cast<string>());
             if (paths.Count == 0)
                 return null;
 
+            // Single Explorer image file → store original high-quality bytes as Image.
+            if (settings.CaptureImages && ImageFileDetector.IsSingleExistingImageFile(paths))
+            {
+                var hq = TryCaptureOriginalImageFile(paths[0], paths, settings, text);
+                if (hq is not null)
+                    return hq;
+                // Fall through to path-only Files if original read fails and CaptureFiles is on.
+            }
+
+            if (!settings.CaptureFiles)
+                return null;
+
             var listJson = Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(paths, AppIdentity.JsonOptions));
-            payloads.Add((ClipboardFormatKind.FileDropList, listJson));
+            payloads.Add((ClipboardFormatKind.FileDropList, listJson, null));
 
             var hash = ContentHasher.ComputeHash(
                 payloads.Select(p => (p.Format, (ReadOnlyMemory<byte>)p.Bytes)).ToList(),
@@ -152,9 +169,17 @@ internal sealed class ClipboardFormatReader
                 PreviewText = string.Join(", ", names),
                 CharacterCount = 0,
                 FilePaths = paths.ToList(),
-                Payloads = payloads.Select(p => new PayloadWriteRequest { Format = p.Format, Bytes = p.Bytes }).ToList(),
+                Payloads = payloads.Select(p => new PayloadWriteRequest
+                {
+                    Format = p.Format,
+                    Bytes = p.Bytes,
+                    RelativeFileName = p.RelativeFileName,
+                }).ToList(),
             };
         }
+
+        if (clipboardPng is { Length: > 0 })
+            return BuildImageItemFromPngBytes(clipboardPng, settings, text);
 
         if (image is not null)
         {
@@ -165,41 +190,7 @@ internal sealed class ClipboardFormatReader
             }
 
             var png = ThumbnailService.EncodePng(image);
-            payloads.Add((ClipboardFormatKind.ImagePng, png));
-
-            var thumb = _thumbnails.CreateThumbnailPng(image);
-            if (thumb is not null)
-                payloads.Add((ClipboardFormatKind.ThumbnailPng, thumb));
-
-            // Release full image reference ASAP
-            image = null;
-
-            if (!string.IsNullOrEmpty(text) && settings.CaptureText)
-                payloads.Add((ClipboardFormatKind.UnicodeText, Encoding.UTF8.GetBytes(text)));
-
-            var hash = ContentHasher.ComputeHash(payloads.Select(p => (p.Format, (ReadOnlyMemory<byte>)p.Bytes)).ToList());
-            if (!IsWithinSizeLimit(settings, payloads.Sum(p => (long)p.Bytes.Length)))
-                return NewClipboardItemDataExtensions.OversizedSentinel();
-
-            var width = 0;
-            var height = 0;
-            using (var ms = new MemoryStream(png))
-            {
-                var decoder = new PngBitmapDecoder(ms, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-                width = decoder.Frames[0].PixelWidth;
-                height = decoder.Frames[0].PixelHeight;
-            }
-
-            return new NewClipboardItemData
-            {
-                DominantKind = ClipboardItemKind.Image,
-                ContentHash = hash,
-                PreviewText = string.IsNullOrWhiteSpace(text) ? "Image" : TextPreview.Create(text),
-                CharacterCount = text?.Length ?? 0,
-                ImageWidth = width,
-                ImageHeight = height,
-                Payloads = payloads.Select(p => new PayloadWriteRequest { Format = p.Format, Bytes = p.Bytes }).ToList(),
-            };
+            return BuildImageItemFromPngBytes(png, settings, text, image);
         }
 
         if (string.IsNullOrEmpty(text) && string.IsNullOrEmpty(html) && string.IsNullOrEmpty(rtf))
@@ -209,11 +200,11 @@ internal sealed class ClipboardFormatReader
         }
 
         if (!string.IsNullOrEmpty(text))
-            payloads.Add((ClipboardFormatKind.UnicodeText, Encoding.UTF8.GetBytes(text)));
+            payloads.Add((ClipboardFormatKind.UnicodeText, Encoding.UTF8.GetBytes(text), null));
         if (!string.IsNullOrEmpty(html))
-            payloads.Add((ClipboardFormatKind.Html, Encoding.UTF8.GetBytes(html)));
+            payloads.Add((ClipboardFormatKind.Html, Encoding.UTF8.GetBytes(html), null));
         if (!string.IsNullOrEmpty(rtf))
-            payloads.Add((ClipboardFormatKind.Rtf, Encoding.UTF8.GetBytes(rtf)));
+            payloads.Add((ClipboardFormatKind.Rtf, Encoding.UTF8.GetBytes(rtf), null));
 
         if (payloads.Count == 0)
             return null;
@@ -228,7 +219,6 @@ internal sealed class ClipboardFormatReader
             return null;
         if (kind == ClipboardItemKind.RichText && !settings.CaptureRichText && settings.CaptureText)
         {
-            // Store plain text only
             payloads.RemoveAll(p => p.Format is ClipboardFormatKind.Html or ClipboardFormatKind.Rtf);
             kind = ClipboardItemKind.Text;
         }
@@ -244,7 +234,162 @@ internal sealed class ClipboardFormatReader
             ContentHash = textHash,
             PreviewText = TextPreview.Create(text ?? string.Empty),
             CharacterCount = text?.Length ?? 0,
-            Payloads = payloads.Select(p => new PayloadWriteRequest { Format = p.Format, Bytes = p.Bytes }).ToList(),
+            Payloads = payloads.Select(p => new PayloadWriteRequest
+            {
+                Format = p.Format,
+                Bytes = p.Bytes,
+                RelativeFileName = p.RelativeFileName,
+            }).ToList(),
+        };
+    }
+
+    private NewClipboardItemData? TryCaptureOriginalImageFile(
+        string path,
+        IReadOnlyList<string> paths,
+        AppSettings settings,
+        string? text)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists)
+                return null;
+
+            if (!IsWithinSizeLimit(settings, info.Length))
+                return NewClipboardItemDataExtensions.OversizedSentinel();
+
+            var originalBytes = File.ReadAllBytes(path);
+            if (originalBytes.Length == 0)
+                return null;
+
+            if (!ThumbnailService.TryGetImageDimensions(originalBytes, out var width, out var height))
+            {
+                _logger.Warn("OriginalImageDecode", "Could not read image dimensions");
+                return null;
+            }
+
+            if (!ImageSizeGuard.IsWithinBudget(width, height))
+            {
+                _logger.Warn("ImageTooLarge", "Rejected image dimensions");
+                return null;
+            }
+
+            var payloads = new List<PayloadWriteRequest>
+            {
+                new()
+                {
+                    Format = ClipboardFormatKind.ImageOriginal,
+                    Bytes = originalBytes,
+                    RelativeFileName = ImageFileDetector.SafeOriginalFileName(path),
+                },
+            };
+
+            var listJson = Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(paths, AppIdentity.JsonOptions));
+            payloads.Add(new PayloadWriteRequest
+            {
+                Format = ClipboardFormatKind.FileDropList,
+                Bytes = listJson,
+            });
+
+            var thumb = _thumbnails.CreateThumbnailPngFromImageBytes(originalBytes);
+            if (thumb is not null)
+            {
+                payloads.Add(new PayloadWriteRequest
+                {
+                    Format = ClipboardFormatKind.ThumbnailPng,
+                    Bytes = thumb,
+                });
+            }
+
+            if (!string.IsNullOrEmpty(text) && settings.CaptureText)
+            {
+                payloads.Add(new PayloadWriteRequest
+                {
+                    Format = ClipboardFormatKind.UnicodeText,
+                    Bytes = Encoding.UTF8.GetBytes(text),
+                });
+            }
+
+            var hashPayloads = payloads
+                .Select(p => (p.Format, (ReadOnlyMemory<byte>)p.Bytes))
+                .ToList();
+            var hash = ContentHasher.ComputeHash(hashPayloads, paths);
+            var total = payloads.Sum(p => (long)p.Bytes.LongLength);
+            if (!IsWithinSizeLimit(settings, total))
+                return NewClipboardItemDataExtensions.OversizedSentinel();
+
+            return new NewClipboardItemData
+            {
+                DominantKind = ClipboardItemKind.Image,
+                ContentHash = hash,
+                PreviewText = Path.GetFileName(path),
+                CharacterCount = text?.Length ?? 0,
+                ImageWidth = width,
+                ImageHeight = height,
+                FilePaths = paths.ToList(),
+                Payloads = payloads,
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("CaptureOriginalImageFile", ex);
+            return null;
+        }
+    }
+
+    private NewClipboardItemData? BuildImageItemFromPngBytes(
+        byte[] png,
+        AppSettings settings,
+        string? text,
+        BitmapSource? sourceForThumb = null)
+    {
+        var payloads = new List<(ClipboardFormatKind Format, byte[] Bytes, string? RelativeFileName)>
+        {
+            (ClipboardFormatKind.ImagePng, png, null),
+        };
+
+        byte[]? thumb;
+        if (sourceForThumb is not null)
+            thumb = _thumbnails.CreateThumbnailPng(sourceForThumb);
+        else
+            thumb = _thumbnails.CreateThumbnailPngFromImageBytes(png);
+
+        if (thumb is not null)
+            payloads.Add((ClipboardFormatKind.ThumbnailPng, thumb, null));
+
+        if (!string.IsNullOrEmpty(text) && settings.CaptureText)
+            payloads.Add((ClipboardFormatKind.UnicodeText, Encoding.UTF8.GetBytes(text), null));
+
+        var hash = ContentHasher.ComputeHash(payloads.Select(p => (p.Format, (ReadOnlyMemory<byte>)p.Bytes)).ToList());
+        if (!IsWithinSizeLimit(settings, payloads.Sum(p => (long)p.Bytes.Length)))
+            return NewClipboardItemDataExtensions.OversizedSentinel();
+
+        if (!ThumbnailService.TryGetImageDimensions(png, out var width, out var height))
+        {
+            width = sourceForThumb?.PixelWidth ?? 0;
+            height = sourceForThumb?.PixelHeight ?? 0;
+        }
+
+        if (width > 0 && height > 0 && !ImageSizeGuard.IsWithinBudget(width, height))
+        {
+            _logger.Warn("ImageTooLarge", "Rejected image dimensions");
+            return null;
+        }
+
+        return new NewClipboardItemData
+        {
+            DominantKind = ClipboardItemKind.Image,
+            ContentHash = hash,
+            PreviewText = string.IsNullOrWhiteSpace(text) ? "Image" : TextPreview.Create(text),
+            CharacterCount = text?.Length ?? 0,
+            ImageWidth = width > 0 ? width : null,
+            ImageHeight = height > 0 ? height : null,
+            Payloads = payloads.Select(p => new PayloadWriteRequest
+            {
+                Format = p.Format,
+                Bytes = p.Bytes,
+                RelativeFileName = p.RelativeFileName,
+            }).ToList(),
         };
     }
 

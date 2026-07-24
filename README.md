@@ -108,7 +108,7 @@ Approximate idle memory (does not kill an existing instance):
 Pinned package/tool version: **Velopack / vpk 1.2.0**
 
 ```powershell
-.\tools\build-release.ps1 -Version 0.1.0
+.\tools\build-release.ps1 -Version 1.0.1
 ```
 
 This will:

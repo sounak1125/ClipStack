@@ -1,6 +1,5 @@
 using System.Collections.Specialized;
 using System.IO;
-using System.Text;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using ClipStack.Core.Models;
@@ -71,10 +70,15 @@ internal sealed class ClipboardRestoreService
         var data = new DataObject();
         var hasAny = false;
 
+        var hasImagePayload = item.Payloads.Any(p =>
+            p.Format is ClipboardFormatKind.ImagePng or ClipboardFormatKind.ImageOriginal);
+
+        // File-only items require at least one existing path.
+        // Image items with stored pixels can still paste when source files are gone.
         if (item.DominantKind == ClipboardItemKind.Files || item.FilePaths.Count > 0)
         {
             var existing = item.FilePaths.Where(File.Exists).ToArray();
-            if (existing.Length == 0 && item.FilePaths.Count > 0)
+            if (existing.Length == 0 && item.FilePaths.Count > 0 && !hasImagePayload)
             {
                 missingAllFiles = true;
                 return null;
@@ -112,21 +116,61 @@ internal sealed class ClipboardRestoreService
             hasAny = true;
         }
 
-        var pngBytes = _history.ReadPayloadBytes(item, ClipboardFormatKind.ImagePng);
-        if (pngBytes is { Length: > 0 })
-        {
-            using var ms = new MemoryStream(pngBytes);
-            var bitmap = new BitmapImage();
-            bitmap.BeginInit();
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.StreamSource = ms;
-            bitmap.EndInit();
-            bitmap.Freeze();
-            data.SetImage(bitmap);
+        if (TryAttachImage(data, item))
             hasAny = true;
-        }
 
         return hasAny ? data : null;
+    }
+
+    private bool TryAttachImage(DataObject data, ClipboardItem item)
+    {
+        try
+        {
+            var original = _history.ReadPayloadBytes(item, ClipboardFormatKind.ImageOriginal);
+            if (original is { Length: > 0 })
+            {
+                var bitmap = ThumbnailService.LoadFrozenFromBytes(original);
+                if (bitmap is not null)
+                {
+                    data.SetImage(bitmap);
+                    // Also expose raw PNG when the original is already PNG for apps that prefer it.
+                    var originalPayload = item.Payloads.FirstOrDefault(p => p.Format == ClipboardFormatKind.ImageOriginal);
+                    if (originalPayload is not null
+                        && originalPayload.RelativePath.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            data.SetData("PNG", new MemoryStream(original));
+                        }
+                        catch { /* optional */ }
+                    }
+
+                    return true;
+                }
+            }
+
+            var pngBytes = _history.ReadPayloadBytes(item, ClipboardFormatKind.ImagePng);
+            if (pngBytes is { Length: > 0 })
+            {
+                var bitmap = ThumbnailService.LoadFrozenFromBytes(pngBytes);
+                if (bitmap is not null)
+                {
+                    data.SetImage(bitmap);
+                    try
+                    {
+                        data.SetData("PNG", new MemoryStream(pngBytes));
+                    }
+                    catch { /* optional */ }
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("RestoreImage", ex);
+        }
+
+        return false;
     }
 }
 

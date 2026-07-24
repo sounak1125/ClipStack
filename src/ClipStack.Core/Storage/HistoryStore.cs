@@ -62,7 +62,10 @@ public sealed class HistoryStore
                 existing.LastUsedUtc = DateTimeOffset.UtcNow;
                 _index.Items.Remove(existing);
                 _index.Items.Insert(0, existing);
+                var promotedEvicted = EvictOverflow_NoLock(historyLimit);
                 SaveIndexAtomic_NoLock();
+                foreach (var e in promotedEvicted)
+                    TryDeleteItemFolder(e.Id);
                 return (existing, true);
             }
 
@@ -123,14 +126,7 @@ public sealed class HistoryStore
 
                 _index.Items.Insert(0, item);
 
-                var evicted = new List<ClipboardItem>();
-                while (_index.Items.Count > historyLimit)
-                {
-                    var last = _index.Items[^1];
-                    _index.Items.RemoveAt(_index.Items.Count - 1);
-                    evicted.Add(last);
-                }
-
+                var evicted = EvictOverflow_NoLock(historyLimit);
                 SaveIndexAtomic_NoLock();
 
                 foreach (var e in evicted)
@@ -144,6 +140,41 @@ public sealed class HistoryStore
                 throw;
             }
         }
+    }
+
+    /// <summary>
+    /// Evicts oldest items until count &lt;= <paramref name="historyLimit"/>.
+    /// Used when the limit is lowered from Settings (not only on the next capture).
+    /// </summary>
+    public int TrimToLimit(int historyLimit)
+    {
+        if (historyLimit < 1) historyLimit = 1;
+
+        List<ClipboardItem> evicted;
+        lock (_gate)
+        {
+            evicted = EvictOverflow_NoLock(historyLimit);
+            if (evicted.Count > 0)
+                SaveIndexAtomic_NoLock();
+        }
+
+        foreach (var e in evicted)
+            TryDeleteItemFolder(e.Id);
+
+        return evicted.Count;
+    }
+
+    private List<ClipboardItem> EvictOverflow_NoLock(int historyLimit)
+    {
+        var evicted = new List<ClipboardItem>();
+        while (_index.Items.Count > historyLimit)
+        {
+            var last = _index.Items[^1];
+            _index.Items.RemoveAt(_index.Items.Count - 1);
+            evicted.Add(last);
+        }
+
+        return evicted;
     }
 
     public bool DeleteItem(Guid id)
@@ -378,6 +409,17 @@ public sealed class HistoryStore
         AddIfExists(ClipboardFormatKind.ThumbnailPng, PayloadFileNames.Thumbnail);
         AddIfExists(ClipboardFormatKind.FileDropList, PayloadFileNames.Files);
 
+        // Original HQ image files: original.jpg, original.webp, etc.
+        foreach (var file in Directory.EnumerateFiles(dir, "original.*"))
+        {
+            var name = Path.GetFileName(file);
+            if (!PayloadFileNames.IsOriginalImageFileName(name))
+                continue;
+            if (payloads.Any(p => p.RelativePath.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            AddIfExists(ClipboardFormatKind.ImageOriginal, name);
+        }
+
         if (payloads.Count == 0)
             return null;
 
@@ -399,7 +441,8 @@ public sealed class HistoryStore
                 : ClipboardItemKind.Text;
         }
 
-        if (File.Exists(Path.Combine(dir, PayloadFileNames.Image)))
+        if (File.Exists(Path.Combine(dir, PayloadFileNames.Image))
+            || payloads.Any(p => p.Format == ClipboardFormatKind.ImageOriginal))
         {
             kind = ClipboardItemKind.Image;
             if (string.IsNullOrEmpty(preview))
@@ -409,13 +452,24 @@ public sealed class HistoryStore
         var filesPath = Path.Combine(dir, PayloadFileNames.Files);
         if (File.Exists(filesPath))
         {
-            kind = ClipboardItemKind.Files;
             try
             {
                 files = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(filesPath), AppIdentity.JsonOptions) ?? [];
-                preview = string.Join(", ", files.Take(2).Select(Path.GetFileName));
             }
             catch { /* ignore */ }
+
+            // Path-only file drops stay Files; HQ image captures keep Image even with FileDropList.
+            if (kind != ClipboardItemKind.Image)
+            {
+                kind = ClipboardItemKind.Files;
+                preview = string.Join(", ", files.Take(2).Select(Path.GetFileName));
+            }
+            else if (string.IsNullOrEmpty(preview) || preview == "Image")
+            {
+                preview = string.Join(", ", files.Take(2).Select(Path.GetFileName));
+                if (string.IsNullOrEmpty(preview))
+                    preview = "Image";
+            }
         }
 
         var thumb = payloads.FirstOrDefault(p => p.Format == ClipboardFormatKind.ThumbnailPng);
@@ -469,6 +523,7 @@ public sealed class HistoryStore
                         validPayloads.Add(payload);
                     else if (payload.Format is ClipboardFormatKind.UnicodeText
                              or ClipboardFormatKind.ImagePng
+                             or ClipboardFormatKind.ImageOriginal
                              or ClipboardFormatKind.FileDropList)
                     {
                         requiredOk = false;
