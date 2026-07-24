@@ -3,9 +3,9 @@ namespace ClipStack.Core.Settings;
 public sealed class AppSettings
 {
     public const int MinHistoryLimit = 1;
-    public const int MaxHistoryLimit = 20;
-    public const int DefaultHistoryLimit = 20;
-    public const long DefaultMaxItemSizeBytes = 128L * 1024 * 1024;
+    public const int MaxHistoryLimit = 50;
+    public const int DefaultHistoryLimit = 50;
+    public const long DefaultMaxItemSizeBytes = 200L * 1024 * 1024;
 
     public bool StartWithWindows { get; set; }
 

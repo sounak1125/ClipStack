@@ -26,6 +26,29 @@ public partial class ClipboardPopupWindow : Window
 
     public void EndSuppressDeactivate() => _suppressDeactivateHide = false;
 
+    public void ScrollSelectionIntoView()
+    {
+        var selected = ViewModel?.SelectedItem;
+        if (selected is null) return;
+
+        // Defer until layout has applied SelectedItem binding.
+        Dispatcher.BeginInvoke(() =>
+        {
+            try
+            {
+                HistoryList.ScrollIntoView(selected);
+                if (HistoryList.ItemContainerGenerator.ContainerFromItem(selected) is System.Windows.Controls.ListBoxItem container)
+                    container.Focus();
+                else
+                    HistoryList.Focus();
+            }
+            catch
+            {
+                // Ignore layout races while the popup is closing.
+            }
+        }, System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
     private void OnDeactivated(object? sender, EventArgs e)
     {
         if (_suppressDeactivateHide || _openingSettings)
@@ -115,12 +138,21 @@ public partial class ClipboardPopupWindow : Window
 
     private void OnItemClick(object sender, MouseButtonEventArgs e)
     {
-        if (e.OriginalSource is DependencyObject d
-            && FindAncestor<System.Windows.Controls.ListBoxItem>(d) is not null
-            && HistoryList.SelectedItem is not null)
-        {
-            PasteRequested?.Invoke();
-        }
+        // Prefer the clicked row's DataContext — SelectedItem binding can lag
+        // behind PreviewMouseLeftButtonUp on a newly clicked row.
+        if (e.OriginalSource is not DependencyObject d)
+            return;
+
+        var listBoxItem = FindAncestor<System.Windows.Controls.ListBoxItem>(d);
+        if (listBoxItem?.DataContext is not ClipboardItemViewModel clicked)
+            return;
+
+        var vm = ViewModel;
+        if (vm is null) return;
+
+        vm.SelectedItem = clicked;
+        PasteRequested?.Invoke();
+        e.Handled = true;
     }
 
     private static T? FindAncestor<T>(DependencyObject current) where T : DependencyObject

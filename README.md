@@ -7,7 +7,7 @@ It is a native **C# / WPF / .NET 10** desktop app (not Electron, not Chromium, n
 ## Features
 
 - Event-driven clipboard capture (`AddClipboardFormatListener`) — no polling
-- Default history of **10** items (configurable 1–50)
+- Default history of **50** items (configurable 1–50)
 - Global shortcut default: **Ctrl + Shift + S**
 - Compact floating popup near the cursor
 - System tray app (no taskbar window during normal use)
@@ -163,7 +163,7 @@ Debug/unpackaged runs do not auto-enable startup. The tray checkbox and Settings
 
 - Auto-paste uses `SendInput` and cannot paste into elevated windows unless ClipStack itself is elevated (ClipStack intentionally runs `asInvoker` and will not request admin). If auto-paste fails, content remains on the clipboard — press `Ctrl+V`.
 - Some apps use private clipboard formats that ClipStack cannot reconstruct.
-- Extremely large clipboard payloads can be skipped when over the configured size limit (default 128 MB).
+- Extremely large clipboard payloads can be skipped when over the configured size limit (default 200 MB).
 
 ## How to rename the app
 

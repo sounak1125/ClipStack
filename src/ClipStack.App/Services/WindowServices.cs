@@ -85,13 +85,18 @@ internal sealed class ForegroundWindowService
 {
     private IntPtr _lastForeground;
 
-    public void Capture() => _lastForeground = NativeMethods.GetForegroundWindow();
+    public void Capture()
+    {
+        var hwnd = NativeMethods.GetForegroundWindow();
+        if (hwnd != IntPtr.Zero)
+            _lastForeground = hwnd;
+    }
 
     public IntPtr LastForeground => _lastForeground;
 
     public async Task<bool> TryRestoreAsync(CancellationToken cancellationToken = default)
     {
-        if (_lastForeground == IntPtr.Zero)
+        if (_lastForeground == IntPtr.Zero || !NativeMethods.IsWindow(_lastForeground))
             return false;
 
         try
@@ -99,17 +104,17 @@ internal sealed class ForegroundWindowService
             if (NativeMethods.IsIconic(_lastForeground))
                 NativeMethods.ShowWindow(_lastForeground, NativeMethods.SW_RESTORE);
 
-            NativeMethods.SetForegroundWindow(_lastForeground);
+            ForceForeground(_lastForeground);
 
-            for (var attempt = 0; attempt < 8; attempt++)
+            for (var attempt = 0; attempt < 12; attempt++)
             {
                 if (NativeMethods.GetForegroundWindow() == _lastForeground)
                     return true;
 
-                if (attempt == 3)
-                    NativeMethods.SetForegroundWindow(_lastForeground);
+                if (attempt is 2 or 6)
+                    ForceForeground(_lastForeground);
 
-                await Task.Delay(25, cancellationToken).ConfigureAwait(true);
+                await Task.Delay(30, cancellationToken).ConfigureAwait(true);
             }
 
             return NativeMethods.GetForegroundWindow() == _lastForeground;
@@ -117,6 +122,35 @@ internal sealed class ForegroundWindowService
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Mouse activation of our popup often blocks a plain SetForegroundWindow.
+    /// AttachThreadInput temporarily joins input queues so focus can return to the target.
+    /// </summary>
+    private static void ForceForeground(IntPtr hwnd)
+    {
+        var targetThread = NativeMethods.GetWindowThreadProcessId(hwnd, out _);
+        var currentThread = NativeMethods.GetCurrentThreadId();
+
+        if (targetThread != 0 && targetThread != currentThread)
+        {
+            NativeMethods.AttachThreadInput(currentThread, targetThread, true);
+            try
+            {
+                NativeMethods.BringWindowToTop(hwnd);
+                NativeMethods.SetForegroundWindow(hwnd);
+            }
+            finally
+            {
+                NativeMethods.AttachThreadInput(currentThread, targetThread, false);
+            }
+        }
+        else
+        {
+            NativeMethods.BringWindowToTop(hwnd);
+            NativeMethods.SetForegroundWindow(hwnd);
         }
     }
 }
