@@ -127,6 +127,43 @@
       </Setter>
     </Style>
 
+    <Style TargetType="ComboBox">
+      <Setter Property="MinHeight" Value="32" />
+      <Setter Property="Padding" Value="8,4" />
+      <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+      <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+    </Style>
+
+    <Style TargetType="ComboBoxItem">
+      <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+      <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+      <Setter Property="Padding" Value="8,4" />
+      <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBoxItem">
+            <Border x:Name="ItemSurface"
+                    Background="{TemplateBinding Background}"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="ItemSurface" Property="Background" Value="{DynamicResource HoverBrush}" />
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="ItemSurface" Property="Background" Value="{DynamicResource SelectedBrush}" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <Style x:Key="BaseButton" TargetType="Button">
       <Setter Property="MinHeight" Value="32" />
       <Setter Property="Padding" Value="12,6" />
@@ -153,7 +190,7 @@
                 <Setter TargetName="Surface" Property="Background" Value="{DynamicResource HoverBrush}" />
               </Trigger>
               <Trigger Property="IsPressed" Value="True">
-                <Setter TargetName="Surface" Property="Background" Value="{DynamicResource SelectedBrush}" />
+                <Setter TargetName="Surface" Property="Background" Value="{DynamicResource HoverBrush}" />
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter Property="Opacity" Value="0.5" />
@@ -164,14 +201,45 @@
       </Setter>
     </Style>
 
-    <Style x:Key="PrimaryButton"
-           TargetType="Button"
-           BasedOn="{StaticResource BaseButton}">
+    <Style x:Key="PrimaryButton" TargetType="Button">
+      <Setter Property="MinHeight" Value="32" />
       <Setter Property="MinWidth" Value="88" />
+      <Setter Property="Padding" Value="12,6" />
       <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
       <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
       <Setter Property="Foreground" Value="{DynamicResource AccentForegroundBrush}" />
+      <Setter Property="Cursor" Value="Hand" />
       <Setter Property="Tag" Value="Primary" />
+      <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Surface"
+                    Padding="{TemplateBinding Padding}"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}">
+              <ContentPresenter HorizontalAlignment="Center"
+                                VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Surface" Property="Opacity" Value="0.92" />
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Surface" Property="Background" Value="{DynamicResource AccentBrush}" />
+                <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                <Setter TargetName="Surface" Property="Opacity" Value="0.88" />
+                <Setter Property="Foreground" Value="{DynamicResource AccentForegroundBrush}" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.5" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 
     <Style x:Key="DangerButton"
@@ -346,6 +414,25 @@
                       AutomationProperties.Name="Clear on exit">
               <TextBlock Text="Clear on exit" Style="{StaticResource SettingTitle}" />
             </CheckBox>
+
+            <Border Style="{StaticResource SettingRow}">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="140" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Appearance" Style="{StaticResource SettingTitle}" VerticalAlignment="Center" />
+                <ComboBox x:Name="ThemeCombo"
+                          Grid.Column="1"
+                          SelectionChanged="OnThemeSelectionChanged"
+                          AutomationProperties.Name="Appearance theme">
+                  <ComboBoxItem Content="Dark" Tag="Dark" />
+                  <ComboBoxItem Content="Light" Tag="Light" />
+                  <ComboBoxItem Content="Dim" Tag="Dim" />
+                  <ComboBoxItem Content="Contrast" Tag="Contrast" />
+                </ComboBox>
+              </Grid>
+            </Border>
 
             <Border Style="{StaticResource SettingRow}">
               <Grid>

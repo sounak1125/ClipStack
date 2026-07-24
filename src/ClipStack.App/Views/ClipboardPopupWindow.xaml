@@ -50,7 +50,8 @@
                 <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
               </Trigger>
               <Trigger Property="IsPressed" Value="True">
-                <Setter TargetName="Surface" Property="Background" Value="{DynamicResource SelectedBrush}" />
+                <Setter TargetName="Surface" Property="Background" Value="{DynamicResource HoverBrush}" />
+                <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>

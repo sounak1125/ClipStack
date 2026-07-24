@@ -1,6 +1,7 @@
 using System.Windows;
 using ClipStack.Core;
 using ClipStack.Core.Models;
+using ClipStack.Core.Settings;
 using ClipStack.Core.Storage;
 using ClipStack.Core.Utilities;
 using ClipStack.Interop;
@@ -273,7 +274,8 @@ internal sealed class AppController : IDisposable
             _updates,
             TryChangeHotKey,
             OnSettingsChanged,
-            ClearHistory);
+            ClearHistory,
+            ApplyTheme);
 
         _settingsWindow.Closed += (_, _) =>
         {
@@ -336,13 +338,18 @@ internal sealed class AppController : IDisposable
 
     private void ApplyTheme(string theme)
     {
-        // Default and System map to Dark for the minimal dark UI.
-        // Explicit "Light" still loads the light dictionary.
-        var useLight = theme.Equals("Light", StringComparison.OrdinalIgnoreCase);
+        var normalized = AppSettings.NormalizeTheme(theme);
+        var source = normalized switch
+        {
+            "Light" => "Themes/Light.xaml",
+            "Dim" => "Themes/Dim.xaml",
+            "Contrast" => "Themes/Contrast.xaml",
+            _ => "Themes/Dark.xaml",
+        };
 
         var dict = new ResourceDictionary
         {
-            Source = new Uri(useLight ? "Themes/Light.xaml" : "Themes/Dark.xaml", UriKind.Relative),
+            Source = new Uri(source, UriKind.Relative),
         };
 
         var app = Application.Current;

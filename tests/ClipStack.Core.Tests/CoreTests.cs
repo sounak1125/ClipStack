@@ -254,6 +254,21 @@ public class SettingsStoreTests
     }
 
     [TestMethod]
+    public void Settings_NormalizeTheme_Allowlist()
+    {
+        Assert.AreEqual("Dark", AppSettings.NormalizeTheme(null));
+        Assert.AreEqual("Dark", AppSettings.NormalizeTheme(""));
+        Assert.AreEqual("Dark", AppSettings.NormalizeTheme("System"));
+        Assert.AreEqual("Light", AppSettings.NormalizeTheme("light"));
+        Assert.AreEqual("Dim", AppSettings.NormalizeTheme("DIM"));
+        Assert.AreEqual("Contrast", AppSettings.NormalizeTheme("Contrast"));
+
+        var s = new AppSettings { Theme = "System" };
+        s.ValidateAndClamp();
+        Assert.AreEqual("Dark", s.Theme);
+    }
+
+    [TestMethod]
     public void Settings_PersistAndReload()
     {
         var root = Path.Combine(Path.GetTempPath(), "ClipStackTests", Guid.NewGuid().ToString("N"));
