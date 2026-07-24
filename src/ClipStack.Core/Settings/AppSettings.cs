@@ -38,6 +38,26 @@ public sealed class AppSettings
 
     public string Theme { get; set; } = "Dark";
 
+    public static readonly string[] AllowedThemes = ["Dark", "Light", "Dim", "Contrast"];
+
+    public static bool IsAllowedTheme(string? theme) =>
+        !string.IsNullOrWhiteSpace(theme)
+        && AllowedThemes.Any(t => t.Equals(theme, StringComparison.OrdinalIgnoreCase));
+
+    public static string NormalizeTheme(string? theme)
+    {
+        if (string.IsNullOrWhiteSpace(theme))
+            return "Dark";
+
+        foreach (var allowed in AllowedThemes)
+        {
+            if (allowed.Equals(theme, StringComparison.OrdinalIgnoreCase))
+                return allowed;
+        }
+
+        return "Dark";
+    }
+
     public AppSettings Clone() => new()
     {
         StartWithWindows = StartWithWindows,
@@ -65,7 +85,6 @@ public sealed class AppSettings
         HotKey ??= Models.HotKeyConfiguration.Default.Clone();
         if (!HotKey.IsValid)
             HotKey = Models.HotKeyConfiguration.Default.Clone();
-        if (string.IsNullOrWhiteSpace(Theme))
-            Theme = "System";
+        Theme = NormalizeTheme(Theme);
     }
 }

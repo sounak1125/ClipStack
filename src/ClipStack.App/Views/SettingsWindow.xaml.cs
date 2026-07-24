@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using ClipStack.Core;
 using MediaBrush = System.Windows.Media.Brush;
@@ -19,9 +20,13 @@ public partial class SettingsWindow : Window
     private readonly Func<HotKeyConfiguration, bool> _tryRegisterHotKey;
     private readonly Action _onSettingsChanged;
     private readonly Action _onClearHistory;
+    private readonly Action<string> _applyTheme;
     private HotKeyConfiguration _draftHotKey;
     private HotKeyConfiguration _shortcutBeforeRecording;
     private bool _isRecordingShortcut;
+    private string _themeAtOpen = "Dark";
+    private bool _themeSaved;
+    private bool _loadingTheme;
 
     public SettingsWindow(
         SettingsStore settingsStore,
@@ -30,7 +35,8 @@ public partial class SettingsWindow : Window
         UpdateService updateService,
         Func<HotKeyConfiguration, bool> tryRegisterHotKey,
         Action onSettingsChanged,
-        Action onClearHistory)
+        Action onClearHistory,
+        Action<string> applyTheme)
     {
         InitializeComponent();
         _settingsStore = settingsStore;
@@ -40,11 +46,13 @@ public partial class SettingsWindow : Window
         _tryRegisterHotKey = tryRegisterHotKey;
         _onSettingsChanged = onSettingsChanged;
         _onClearHistory = onClearHistory;
+        _applyTheme = applyTheme;
         _draftHotKey = settingsStore.Current.HotKey.Clone();
         _shortcutBeforeRecording = _draftHotKey.Clone();
         SettingsNavigation.SelectionChanged += OnSettingsNavigationChanged;
         SettingsNavigation.SelectedIndex = 0;
         PreviewKeyDown += OnWindowPreviewKeyDown;
+        Closed += OnWindowClosed;
         LoadFromSettings();
         _updateService.StatusChanged += () => Dispatcher.Invoke(RefreshUpdateUi);
     }
@@ -64,6 +72,8 @@ public partial class SettingsWindow : Window
         CaptureFiles.IsChecked = s.CaptureFiles;
         CaptureEnabled.IsChecked = !s.PauseCapture;
         AutoUpdates.IsChecked = s.CheckForUpdatesAutomatically;
+        _themeAtOpen = AppSettings.NormalizeTheme(s.Theme);
+        SelectThemeCombo(_themeAtOpen);
         _draftHotKey = s.HotKey.Clone();
         _isRecordingShortcut = false;
         RefreshShortcutDisplay();
@@ -72,6 +82,49 @@ public partial class SettingsWindow : Window
         DiskUsageText.Text = FormatBytes(_historyStore.CalculateDiskUsageBytes());
         SidebarVersionText.Text = _updateService.CurrentVersion;
         RefreshUpdateUi();
+    }
+
+    private void SelectThemeCombo(string theme)
+    {
+        _loadingTheme = true;
+        try
+        {
+            foreach (ComboBoxItem item in ThemeCombo.Items)
+            {
+                if (string.Equals(item.Tag as string, theme, StringComparison.OrdinalIgnoreCase))
+                {
+                    ThemeCombo.SelectedItem = item;
+                    return;
+                }
+            }
+
+            ThemeCombo.SelectedIndex = 0;
+        }
+        finally
+        {
+            _loadingTheme = false;
+        }
+    }
+
+    private string GetSelectedTheme()
+    {
+        if (ThemeCombo.SelectedItem is ComboBoxItem { Tag: string tag })
+            return AppSettings.NormalizeTheme(tag);
+        return "Dark";
+    }
+
+    private void OnThemeSelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (_loadingTheme || ThemeCombo is null)
+            return;
+
+        _applyTheme(GetSelectedTheme());
+    }
+
+    private void OnWindowClosed(object? sender, EventArgs e)
+    {
+        if (!_themeSaved)
+            _applyTheme(_themeAtOpen);
     }
 
     private void RefreshUpdateUi()
@@ -358,8 +411,11 @@ public partial class SettingsWindow : Window
             s.CaptureFiles = CaptureFiles.IsChecked == true;
             s.PauseCapture = CaptureEnabled.IsChecked != true;
             s.CheckForUpdatesAutomatically = AutoUpdates.IsChecked == true;
+            s.Theme = GetSelectedTheme();
         });
 
+        _themeSaved = true;
+        _applyTheme(GetSelectedTheme());
         _onSettingsChanged();
         Close();
     }
