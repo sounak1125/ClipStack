@@ -159,6 +159,8 @@ internal sealed class AppController : IDisposable
         if (_shuttingDown) return;
         if (_popup.IsVisible)
         {
+            RefreshPopup();
+            FocusMostRecentItem();
             _popup.Activate();
             _popup.Focus();
             return;
@@ -166,6 +168,7 @@ internal sealed class AppController : IDisposable
 
         _foreground.Capture();
         RefreshPopup();
+        FocusMostRecentItem();
 
         _popup.Width = 408;
         _popup.Height = 360;
@@ -177,6 +180,13 @@ internal sealed class AppController : IDisposable
         _popup.Opacity = 1;
         _popup.Activate();
         _popup.Focus();
+        FocusMostRecentItem();
+    }
+
+    private void FocusMostRecentItem()
+    {
+        _popupVm.SelectMostRecent();
+        _popup.ScrollSelectionIntoView();
     }
 
     private void RefreshPopup()
@@ -198,26 +208,49 @@ internal sealed class AppController : IDisposable
         var selected = _popupVm.SelectedItem;
         if (selected is null) return;
 
+        // Snapshot before hide; mouse path must not depend on later ListBox state.
+        var item = selected.Item;
         var settings = _settings.Current;
-        var result = await _restore.RestoreAsync(selected.Item).ConfigureAwait(true);
-        if (!result.Success)
+
+        // Hide first so Windows can return activation to the captured target
+        // (plain SetForegroundWindow often fails after a mouse click on our popup).
+        _popup.BeginSuppressDeactivate();
+        try
         {
-            _tray.ShowBalloon(result.Message ?? "Restore failed.");
-            return;
+            HidePopup();
+
+            var result = await _restore.RestoreAsync(item).ConfigureAwait(true);
+            if (!result.Success)
+            {
+                _tray.ShowBalloon(result.Message ?? "Restore failed.");
+                return;
+            }
+
+            if (!settings.AutoPaste)
+            {
+                _tray.ShowBalloon("Copied to clipboard.");
+                return;
+            }
+
+            var focusOk = await _foreground.TryRestoreAsync(_lifetimeCts.Token).ConfigureAwait(true);
+            if (focusOk)
+            {
+                // Brief settle so OLE clipboard + target caret are ready (images especially).
+                await Task.Delay(50, _lifetimeCts.Token).ConfigureAwait(true);
+            }
+
+            var pasteOk = focusOk && _autoPaste.TrySendCtrlV();
+            if (!pasteOk)
+                _tray.ShowBalloon("Copied to clipboard — press Ctrl+V to paste.");
         }
-
-        HidePopup();
-
-        if (!settings.AutoPaste)
+        catch (OperationCanceledException)
         {
-            _tray.ShowBalloon("Copied to clipboard.");
-            return;
+            // Shutting down.
         }
-
-        var focusOk = await _foreground.TryRestoreAsync(_lifetimeCts.Token).ConfigureAwait(true);
-        var pasteOk = focusOk && _autoPaste.TrySendCtrlV();
-        if (!pasteOk)
-            _tray.ShowBalloon("Copied to clipboard — press Ctrl+V to paste.");
+        finally
+        {
+            _popup.EndSuppressDeactivate();
+        }
     }
 
     private void DeleteSelected()

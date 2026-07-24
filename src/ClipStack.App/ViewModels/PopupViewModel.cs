@@ -243,6 +243,12 @@ public sealed class PopupViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(HasItems));
     }
 
+    /// <summary>Always highlight the newest (top) history row.</summary>
+    public void SelectMostRecent()
+    {
+        SelectedItem = Items.FirstOrDefault();
+    }
+
     public void ClearThumbnails()
     {
         foreach (var item in Items)
