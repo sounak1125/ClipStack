@@ -17,6 +17,7 @@ internal sealed class TrayIconService : IDisposable
     private readonly FileLogger _logger;
     private ToolStripMenuItem? _pauseItem;
     private ToolStripMenuItem? _startupItem;
+    private bool _refreshingStartupItem;
     private bool _disposed;
 
     public event Action? ShowHistoryRequested;
@@ -82,7 +83,7 @@ internal sealed class TrayIconService : IDisposable
         _startupItem = new ToolStripMenuItem("Start with Windows") { CheckOnClick = true };
         _startupItem.CheckedChanged += (_, _) =>
         {
-            if (_startupItem is null) return;
+            if (_startupItem is null || _refreshingStartupItem) return;
             var ok = _startup.SetEnabled(_startupItem.Checked);
             if (!ok)
             {
@@ -137,8 +138,17 @@ internal sealed class TrayIconService : IDisposable
             if (_startupItem is not null)
             {
                 var enabled = _startup.IsEnabled();
-                if (_startupItem.Checked != enabled)
-                    _startupItem.Checked = enabled;
+                _startupItem.Enabled = _startup.CanManageStartup;
+                _refreshingStartupItem = true;
+                try
+                {
+                    if (_startupItem.Checked != enabled)
+                        _startupItem.Checked = enabled;
+                }
+                finally
+                {
+                    _refreshingStartupItem = false;
+                }
             }
         }
         catch (Exception ex)

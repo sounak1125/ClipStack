@@ -3,9 +3,32 @@ using ClipStack.Core.Hashing;
 using ClipStack.Core.Models;
 using ClipStack.Core.Settings;
 using ClipStack.Core.Storage;
+using ClipStack.Core.Updates;
 using ClipStack.Core.Utilities;
 
 namespace ClipStack.Core.Tests;
+
+[TestClass]
+public class AutomaticUpdateScheduleTests
+{
+    private static readonly DateTimeOffset Now = new(2026, 7, 24, 12, 0, 0, TimeSpan.Zero);
+
+    [TestMethod]
+    public void ShouldCheck_AlwaysChecksOnLaunch()
+    {
+        var checkedOneMinuteAgo = Now.AddMinutes(-1);
+
+        Assert.IsTrue(AutomaticUpdateSchedule.ShouldCheck(checkedOneMinuteAgo, Now, isLaunchCheck: true));
+    }
+
+    [TestMethod]
+    public void ShouldCheck_UsesCooldownForBackgroundChecks()
+    {
+        Assert.IsFalse(AutomaticUpdateSchedule.ShouldCheck(Now.AddHours(-23), Now, isLaunchCheck: false));
+        Assert.IsTrue(AutomaticUpdateSchedule.ShouldCheck(Now.AddHours(-24), Now, isLaunchCheck: false));
+        Assert.IsTrue(AutomaticUpdateSchedule.ShouldCheck(null, Now, isLaunchCheck: false));
+    }
+}
 
 [TestClass]
 public class ContentHasherTests

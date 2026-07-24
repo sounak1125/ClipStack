@@ -126,7 +126,8 @@ Public releases use the GitHub repository configured in `release-config.json`:
 `https://github.com/sounak1125/ClipStack`
 
 When **Download updates automatically** is enabled, ClipStack checks the public
-GitHub release feed in the background while the app is open. A newer version is
+GitHub release feed shortly after every installed app launch, then in the
+background while the app remains open. A newer version is
 downloaded silently, then a non-modal notification lets the user choose
 **Restart & update** or **Later**. Manual checks remain available from Settings
 and the tray menu.

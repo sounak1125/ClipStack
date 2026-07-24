@@ -61,6 +61,7 @@ public partial class SettingsWindow : Window
     {
         var s = _settingsStore.Current;
         StartWithWindows.IsChecked = _startupService.IsEnabled();
+        StartWithWindows.IsEnabled = _startupService.CanManageStartup;
         AutoPaste.IsChecked = s.AutoPaste;
         ShowNotifications.IsChecked = s.ShowTrayNotifications;
         ClearOnExit.IsChecked = s.ClearHistoryOnExit;
@@ -390,11 +391,15 @@ public partial class SettingsWindow : Window
             mb = AppSettings.DefaultMaxItemSizeBytes / (1024.0 * 1024.0);
 
         var wantStartup = StartWithWindows.IsChecked == true;
-        if (!_startupService.SetEnabled(wantStartup))
+        if (_startupService.CanManageStartup && !_startupService.SetEnabled(wantStartup))
         {
             wantStartup = _startupService.IsEnabled();
             StartWithWindows.IsChecked = wantStartup;
             ConfirmDialog.Alert(this, "Couldn't update", "Start with Windows setting failed.");
+        }
+        else if (!_startupService.CanManageStartup)
+        {
+            wantStartup = _startupService.IsEnabled();
         }
 
         _settingsStore.Update(s =>

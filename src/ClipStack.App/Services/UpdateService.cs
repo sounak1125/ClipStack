@@ -2,6 +2,7 @@ using ClipStack.Core;
 using ClipStack.Core.Models;
 using ClipStack.Core.Settings;
 using ClipStack.Core.Storage;
+using ClipStack.Core.Updates;
 using ClipStack.Core.Utilities;
 using Velopack;
 using Velopack.Exceptions;
@@ -101,10 +102,12 @@ public sealed class UpdateService
         try
         {
             await Task.Delay(TimeSpan.FromSeconds(8), cancellationToken).ConfigureAwait(false);
+            await CheckAutomaticallyAsync(isLaunchCheck: true, cancellationToken).ConfigureAwait(false);
+
             while (!cancellationToken.IsCancellationRequested)
             {
-                await CheckAutomaticallyIfDueAsync(cancellationToken).ConfigureAwait(false);
                 await Task.Delay(TimeSpan.FromHours(1), cancellationToken).ConfigureAwait(false);
+                await CheckAutomaticallyIfDueAsync(cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) { }
@@ -116,6 +119,11 @@ public sealed class UpdateService
 
     public async Task CheckAutomaticallyIfDueAsync(CancellationToken cancellationToken = default)
     {
+        await CheckAutomaticallyAsync(isLaunchCheck: false, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task CheckAutomaticallyAsync(bool isLaunchCheck, CancellationToken cancellationToken)
+    {
         var settings = _settings.Current;
         if (!settings.CheckForUpdatesAutomatically || !_release.AutomaticChecks || !_release.IsConfigured)
             return;
@@ -124,28 +132,27 @@ public sealed class UpdateService
         if (_manager is null || !_manager.IsInstalled)
             return;
 
-        if (settings.LastAutomaticUpdateCheckUtc is { } last
-            && DateTimeOffset.UtcNow - last < TimeSpan.FromHours(24))
-        {
+        var now = DateTimeOffset.UtcNow;
+        if (!AutomaticUpdateSchedule.ShouldCheck(settings.LastAutomaticUpdateCheckUtc, now, isLaunchCheck))
             return;
-        }
 
-        await CheckForUpdatesAsync(manual: false, cancellationToken).ConfigureAwait(false);
-        _settings.Update(s => s.LastAutomaticUpdateCheckUtc = DateTimeOffset.UtcNow);
+        var completed = await CheckForUpdatesAsync(manual: false, cancellationToken).ConfigureAwait(false);
+        if (completed)
+            _settings.Update(s => s.LastAutomaticUpdateCheckUtc = now);
     }
 
-    public async Task CheckForUpdatesAsync(bool manual, CancellationToken cancellationToken = default)
+    public async Task<bool> CheckForUpdatesAsync(bool manual, CancellationToken cancellationToken = default)
     {
         if (!_release.IsConfigured)
         {
             Status = "No feed";
-            return;
+            return false;
         }
 
         if (_manager is null)
         {
             Status = "Unavailable";
-            return;
+            return false;
         }
 
         // Velopack only supports update checks from a real install (Setup/portable pack).
@@ -153,14 +160,14 @@ public sealed class UpdateService
         if (!_manager.IsInstalled)
         {
             Status = "Not installed";
-            return;
+            return false;
         }
 
         if (Interlocked.Exchange(ref _checkRunning, 1) != 0)
         {
             if (manual)
                 Status = "Busy";
-            return;
+            return false;
         }
 
         try
@@ -172,7 +179,7 @@ public sealed class UpdateService
             if (update is null)
             {
                 Status = "Up to date";
-                return;
+                return true;
             }
 
             Status = $"Downloading {update.TargetFullRelease.Version}…";
@@ -180,21 +187,29 @@ public sealed class UpdateService
             _pending = update;
             Status = $"{update.TargetFullRelease.Version} ready";
             UpdateReady?.Invoke(update.TargetFullRelease.Version.ToString());
+            return true;
         }
         catch (NotInstalledException ex)
         {
             _logger.Warn("UpdateCheckNotInstalled", ex.Message);
             Status = "Not installed";
+            return false;
         }
         catch (NotSupportedException ex)
         {
             _logger.Warn("UpdateCheckNotSupported", ex.Message);
             Status = "Unavailable";
+            return false;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             _logger.Error("UpdateCheck", ex);
             Status = "Check failed";
+            return false;
         }
         finally
         {

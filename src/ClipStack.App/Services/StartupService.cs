@@ -13,6 +13,8 @@ public sealed class StartupService
         _logger = logger;
     }
 
+    public bool CanManageStartup => IsInstalledBuild();
+
     public bool IsEnabled()
     {
         try
@@ -32,6 +34,14 @@ public sealed class StartupService
     {
         try
         {
+            // Never let a debug/publish build replace or remove the installed app's
+            // startup registration with a path inside the source tree.
+            if (!CanManageStartup)
+            {
+                _logger.Warn("StartupSetEnabled", "Ignored startup change from an unpackaged build.");
+                return false;
+            }
+
             using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", writable: true)
                             ?? Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
             if (key is null)
