@@ -28,14 +28,22 @@ public partial class ClipboardPopupWindow : Window
 
     public void ScrollSelectionIntoView()
     {
-        var selected = ViewModel?.SelectedItem;
-        if (selected is null) return;
-
-        // Defer until layout has applied SelectedItem binding.
+        // Defer until layout has applied SelectedItem binding and the list is measured.
         Dispatcher.BeginInvoke(() =>
         {
             try
             {
+                // Hidden popups retain ScrollViewer offset; force top before ScrollIntoView.
+                if (FindDescendantScrollViewer(HistoryList) is { } scroll)
+                    scroll.ScrollToHome();
+
+                var selected = ViewModel?.SelectedItem;
+                if (selected is null)
+                {
+                    HistoryList.Focus();
+                    return;
+                }
+
                 HistoryList.ScrollIntoView(selected);
                 if (HistoryList.ItemContainerGenerator.ContainerFromItem(selected) is System.Windows.Controls.ListBoxItem container)
                     container.Focus();
@@ -47,6 +55,22 @@ public partial class ClipboardPopupWindow : Window
                 // Ignore layout races while the popup is closing.
             }
         }, System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    private static System.Windows.Controls.ScrollViewer? FindDescendantScrollViewer(DependencyObject root)
+    {
+        var count = System.Windows.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = System.Windows.Media.VisualTreeHelper.GetChild(root, i);
+            if (child is System.Windows.Controls.ScrollViewer sv)
+                return sv;
+            var nested = FindDescendantScrollViewer(child);
+            if (nested is not null)
+                return nested;
+        }
+
+        return null;
     }
 
     private void OnDeactivated(object? sender, EventArgs e)

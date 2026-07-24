@@ -232,10 +232,8 @@ public sealed class PopupViewModel : INotifyPropertyChanged
             Items.RemoveAt(Items.Count - 1);
         }
 
-        if (SelectedItem is null || Items.All(i => i.Id != SelectedItem.Id))
-            SelectedItem = Items.FirstOrDefault();
-        else
-            SelectedItem = Items.First(i => i.Id == SelectedItem.Id);
+        // Always highlight the newest (top) row after refresh.
+        SelectedItem = Items.FirstOrDefault();
 
         foreach (var vm in Items)
             vm.EnsureThumbnail(_history);
