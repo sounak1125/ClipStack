@@ -122,6 +122,7 @@ internal sealed class AppController : IDisposable
 
         _popup.PasteRequested += shiftHeld => _ = PasteSelectedAsync(shiftHeld);
         _popup.DeleteRequested += DeleteSelected;
+        _popup.TogglePinRequested += TogglePinSelected;
         _popup.SettingsRequested += () => ShowSettings();
         _popup.ClearRequested += ClearHistory;
         _popup.CloseRequested += HidePopup;
@@ -265,6 +266,23 @@ internal sealed class AppController : IDisposable
         if (selected is null) return;
         _history.DeleteItem(selected.Id);
         RefreshPopup();
+    }
+
+    private void TogglePinSelected()
+    {
+        var selected = _popupVm.SelectedItem;
+        if (selected is null) return;
+
+        var id = selected.Id;
+        var pinned = _history.TogglePin(id);
+        if (pinned is null) return;
+
+        RefreshPopup();
+
+        // Pinning re-sorts the list, so follow the item to its new position rather than
+        // leaving the selection on whatever row slid into its place.
+        _popupVm.SelectById(id);
+        _popup.ScrollSelectionIntoView();
     }
 
     private void ClearHistory()

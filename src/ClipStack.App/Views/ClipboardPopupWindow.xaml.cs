@@ -12,6 +12,7 @@ public partial class ClipboardPopupWindow : Window
     /// <summary>Raised with true when Shift was held, meaning "invert the plain-text setting".</summary>
     public event Action<bool>? PasteRequested;
     public event Action? DeleteRequested;
+    public event Action? TogglePinRequested;
     public event Action? SettingsRequested;
     public event Action? ClearRequested;
     public event Action? CloseRequested;
@@ -168,6 +169,14 @@ public partial class ClipboardPopupWindow : Window
             || (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control))
         {
             ActivateFilter(vm);
+            e.Handled = true;
+            return;
+        }
+
+        // Ctrl+P rather than bare P, so P stays available for future type-to-filter.
+        if (e.Key == Key.P && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+        {
+            TogglePinRequested?.Invoke();
             e.Handled = true;
             return;
         }

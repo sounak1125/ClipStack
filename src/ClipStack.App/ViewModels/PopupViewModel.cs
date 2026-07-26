@@ -99,6 +99,8 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
 
     public bool ShowThumbnail => Kind == ClipboardItemKind.Image;
 
+    public bool IsPinned => Item.IsPinned;
+
     public void Update(ClipboardItem item, int shortcutNumber)
     {
         Item = item;
@@ -112,6 +114,7 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(TimeText));
         OnPropertyChanged(nameof(ShowThumbnail));
         OnPropertyChanged(nameof(Thumbnail));
+        OnPropertyChanged(nameof(IsPinned));
     }
 
     private void EnsureThumbnail()
@@ -334,6 +337,14 @@ public sealed class PopupViewModel : INotifyPropertyChanged
     public void SelectMostRecent()
     {
         SelectedItem = Items.FirstOrDefault();
+    }
+
+    /// <summary>Re-selects a specific clip after an operation that reorders the list.</summary>
+    public void SelectById(Guid id)
+    {
+        var match = Items.FirstOrDefault(i => i.Id == id);
+        if (match is not null)
+            SelectedItem = match;
     }
 
     /// <summary>

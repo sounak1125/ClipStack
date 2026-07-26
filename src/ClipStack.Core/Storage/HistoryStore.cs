@@ -62,6 +62,7 @@ public sealed class HistoryStore
                 existing.LastUsedUtc = DateTimeOffset.UtcNow;
                 _index.Items.Remove(existing);
                 _index.Items.Insert(0, existing);
+                SortPinnedFirst_NoLock();
                 var promotedEvicted = EvictOverflow_NoLock(historyLimit);
                 SaveIndexAtomic_NoLock();
                 foreach (var e in promotedEvicted)
@@ -125,6 +126,7 @@ public sealed class HistoryStore
                 };
 
                 _index.Items.Insert(0, item);
+                SortPinnedFirst_NoLock();
 
                 var evicted = EvictOverflow_NoLock(historyLimit);
                 SaveIndexAtomic_NoLock();
@@ -164,17 +166,64 @@ public sealed class HistoryStore
         return evicted.Count;
     }
 
+    /// <summary>
+    /// Evicts the oldest unpinned items until the unpinned count fits the limit.
+    /// </summary>
+    /// <remarks>
+    /// Pinned items are exempt rather than counted, so the limit governs the rolling
+    /// history only. Pinning every slot therefore cannot wedge capture: new clips still
+    /// arrive and simply push each other out. The tradeoff is that the visible list can
+    /// exceed the configured limit by the number of pinned items, which is the whole
+    /// point of pinning something.
+    /// </remarks>
     private List<ClipboardItem> EvictOverflow_NoLock(int historyLimit)
     {
         var evicted = new List<ClipboardItem>();
-        while (_index.Items.Count > historyLimit)
+
+        while (_index.Items.Count(i => !i.IsPinned) > historyLimit)
         {
-            var last = _index.Items[^1];
-            _index.Items.RemoveAt(_index.Items.Count - 1);
-            evicted.Add(last);
+            var lastUnpinned = -1;
+            for (var i = _index.Items.Count - 1; i >= 0; i--)
+            {
+                if (!_index.Items[i].IsPinned)
+                {
+                    lastUnpinned = i;
+                    break;
+                }
+            }
+
+            if (lastUnpinned < 0)
+                break;
+
+            evicted.Add(_index.Items[lastUnpinned]);
+            _index.Items.RemoveAt(lastUnpinned);
         }
 
         return evicted;
+    }
+
+    /// <summary>Keeps pinned items above unpinned ones without disturbing relative order.</summary>
+    private void SortPinnedFirst_NoLock()
+    {
+        _index.Items = _index.Items
+            .OrderByDescending(i => i.IsPinned)
+            .ToList();
+    }
+
+    /// <summary>Toggles the pin flag. Returns the new state, or null when the id is unknown.</summary>
+    public bool? TogglePin(Guid id)
+    {
+        lock (_gate)
+        {
+            var item = _index.Items.FirstOrDefault(i => i.Id == id);
+            if (item is null)
+                return null;
+
+            item.IsPinned = !item.IsPinned;
+            SortPinnedFirst_NoLock();
+            SaveIndexAtomic_NoLock();
+            return item.IsPinned;
+        }
     }
 
     public bool DeleteItem(Guid id)
@@ -217,6 +266,7 @@ public sealed class HistoryStore
             item.LastUsedUtc = DateTimeOffset.UtcNow;
             _index.Items.Remove(item);
             _index.Items.Insert(0, item);
+            SortPinnedFirst_NoLock();
             SaveIndexAtomic_NoLock();
         }
     }

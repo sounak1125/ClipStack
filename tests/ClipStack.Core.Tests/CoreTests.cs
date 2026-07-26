@@ -615,6 +615,142 @@ public class ClipboardExclusionFormatsTests
 }
 
 [TestClass]
+public class PinnedItemTests
+{
+    private string _root = null!;
+    private HistoryStore _store = null!;
+
+    [TestInitialize]
+    public void Init()
+    {
+        _root = Path.Combine(Path.GetTempPath(), "ClipStackTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_root);
+        _store = new HistoryStore(new StoragePaths(_root));
+        _store.Initialize();
+    }
+
+    [TestCleanup]
+    public void Cleanup()
+    {
+        try { if (Directory.Exists(_root)) Directory.Delete(_root, true); } catch { }
+    }
+
+    private ClipboardItem Add(string text)
+    {
+        var bytes = Encoding.UTF8.GetBytes(text);
+        return _store.AddOrPromote(new NewClipboardItemData
+        {
+            DominantKind = ClipboardItemKind.Text,
+            ContentHash = ContentHasher.ComputeHash([(ClipboardFormatKind.UnicodeText, bytes)]),
+            PreviewText = text,
+            Payloads = [new PayloadWriteRequest { Format = ClipboardFormatKind.UnicodeText, Bytes = bytes }],
+        }, 3).Item;
+    }
+
+    [TestMethod]
+    public void TogglePin_FlipsAndPersists()
+    {
+        var item = Add("keep me");
+        Assert.IsTrue(_store.TogglePin(item.Id));
+        Assert.IsTrue(_store.GetById(item.Id)!.IsPinned);
+
+        var reloaded = new HistoryStore(new StoragePaths(_root));
+        reloaded.Initialize();
+        Assert.IsTrue(reloaded.GetById(item.Id)!.IsPinned);
+
+        Assert.IsFalse(_store.TogglePin(item.Id));
+        Assert.IsFalse(_store.GetById(item.Id)!.IsPinned);
+    }
+
+    [TestMethod]
+    public void TogglePin_ReturnsNullForUnknownId() =>
+        Assert.IsNull(_store.TogglePin(Guid.NewGuid()));
+
+    [TestMethod]
+    public void PinnedItem_SurvivesEviction()
+    {
+        var pinned = Add("pin this");
+        _store.TogglePin(pinned.Id);
+
+        // Limit is 3; push well past it.
+        for (var i = 0; i < 10; i++)
+            Add($"filler {i}");
+
+        Assert.IsNotNull(_store.GetById(pinned.Id));
+        Assert.IsTrue(_store.GetById(pinned.Id)!.IsPinned);
+    }
+
+    [TestMethod]
+    public void PinnedItems_SortAboveUnpinned()
+    {
+        Add("first");
+        var target = Add("second");
+        Add("third");
+
+        _store.TogglePin(target.Id);
+        Assert.AreEqual(target.Id, _store.Items[0].Id);
+
+        // A newly captured clip goes to the top of the unpinned block, not above the pin.
+        Add("fourth");
+        Assert.AreEqual(target.Id, _store.Items[0].Id);
+        Assert.AreEqual("fourth", _store.Items[1].PreviewText);
+    }
+
+    [TestMethod]
+    public void HistoryLimit_CountsUnpinnedOnly()
+    {
+        var pinned = Add("pinned");
+        _store.TogglePin(pinned.Id);
+
+        for (var i = 0; i < 5; i++)
+            Add($"filler {i}");
+
+        // Limit 3 governs the rolling history; the pin sits on top of it.
+        Assert.AreEqual(3, _store.Items.Count(i => !i.IsPinned));
+        Assert.AreEqual(4, _store.Items.Count);
+    }
+
+    [TestMethod]
+    public void CaptureStillWorks_WhenEverythingIsPinned()
+    {
+        // Pinning every slot must not wedge capture.
+        for (var i = 0; i < 3; i++)
+        {
+            var item = Add($"pinned {i}");
+            _store.TogglePin(item.Id);
+        }
+
+        var fresh = Add("still captured");
+        Assert.IsNotNull(_store.GetById(fresh.Id));
+        Assert.AreEqual(3, _store.Items.Count(i => i.IsPinned));
+    }
+
+    [TestMethod]
+    public void TrimToLimit_LeavesPinnedAlone()
+    {
+        var pinned = Add("pinned");
+        _store.TogglePin(pinned.Id);
+        Add("a");
+        Add("b");
+
+        _store.TrimToLimit(1);
+
+        Assert.IsNotNull(_store.GetById(pinned.Id));
+        Assert.AreEqual(1, _store.Items.Count(i => !i.IsPinned));
+    }
+
+    [TestMethod]
+    public void DeleteItem_RemovesEvenWhenPinned()
+    {
+        var pinned = Add("pinned");
+        _store.TogglePin(pinned.Id);
+
+        Assert.IsTrue(_store.DeleteItem(pinned.Id));
+        Assert.IsNull(_store.GetById(pinned.Id));
+    }
+}
+
+[TestClass]
 public class TextPreviewTests
 {
     [TestMethod]

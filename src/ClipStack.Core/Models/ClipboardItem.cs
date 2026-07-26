@@ -29,4 +29,10 @@ public sealed class ClipboardItem
     public List<string> FilePaths { get; set; } = [];
 
     public string? ThumbnailRelativePath { get; set; }
+
+    /// <summary>
+    /// Pinned clips sort above the rest and are never evicted, so the history limit
+    /// applies to unpinned clips only.
+    /// </summary>
+    public bool IsPinned { get; set; }
 }

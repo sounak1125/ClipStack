@@ -307,12 +307,21 @@
                              Foreground="{DynamicResource MutedBrush}" />
                 </StackPanel>
 
-                <TextBlock Grid.Column="2"
-                           Text="{Binding ShortcutLabel}"
-                           VerticalAlignment="Center"
-                           Margin="10,0,0,0"
-                           FontSize="12"
-                           Foreground="{DynamicResource MutedBrush}" />
+                <StackPanel Grid.Column="2"
+                            Orientation="Horizontal"
+                            VerticalAlignment="Center"
+                            Margin="10,0,0,0">
+                  <TextBlock Text="📌"
+                             Margin="0,0,6,0"
+                             VerticalAlignment="Center"
+                             FontSize="11"
+                             ToolTip="Pinned"
+                             Visibility="{Binding IsPinned, Converter={StaticResource BoolToVis}}" />
+                  <TextBlock Text="{Binding ShortcutLabel}"
+                             VerticalAlignment="Center"
+                             FontSize="12"
+                             Foreground="{DynamicResource MutedBrush}" />
+                </StackPanel>
               </Grid>
             </DataTemplate>
           </ListBox.ItemTemplate>
