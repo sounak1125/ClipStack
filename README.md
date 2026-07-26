@@ -9,6 +9,9 @@ It is a native **C# / WPF / .NET 10** desktop app (not Electron, not Chromium, n
 - Event-driven clipboard capture (`AddClipboardFormatListener`) — no polling
 - Capture work runs off the UI thread, so large images and files never freeze the popup
 - Honours password-manager clipboard opt-out formats
+- History encrypted at rest with DPAPI under your Windows account
+- Pin clips so they are never evicted
+- Paste as plain text, stripping HTML/RTF
 - Default history of **50** items (configurable 1–50)
 - Global shortcut default: **Ctrl + Shift + S**
 - Compact floating popup near the cursor, with a filter box (`/`)
@@ -54,8 +57,35 @@ governs cross-device sync only, and Windows itself still keeps those clips in lo
 history, so treating it as a storage opt-out would silently drop clips you expect to keep.
 
 This depends on the source application setting one of these formats. An app that copies a
-password without marking it — including most web pages — cannot be detected, and that clip
-is stored like any other text.
+password without marking it — including most web pages — cannot be detected. Encryption
+at rest is what covers those clips.
+
+### Encryption at rest
+
+Payload files are encrypted with **DPAPI** under your Windows account (**Encrypt history
+on disk**, on by default). The key derives from your Windows credentials and is never
+stored by ClipStack, so another account on the same machine cannot read the history even
+with full file access.
+
+What this does **not** protect against: code already running as you, which can decrypt
+exactly as ClipStack does. It raises the cost of offline disk access, not of local malware.
+
+Each encrypted file carries a short header and reads dispatch on that header, not on the
+index. So:
+
+- History written before this version stays readable and is never rewritten.
+- Encryption applies from the next capture onward — upgrading is a no-op.
+- Turning the setting off later leaves earlier encrypted clips readable, and vice versa.
+- A clip that cannot be decrypted (encrypted under a different account, or after a
+  credential reset) is reported rather than returned as garbage.
+
+If a clip cannot be encrypted it is stored in the clear rather than lost, and you are
+notified — a clip silently stored unencrypted while the setting claims otherwise would be
+the worst outcome.
+
+DPAPI costs roughly 50 ms per megabyte. Both encryption and decryption run on background
+threads, so even a 50 MB image (~2.5 s to encrypt, ~3.4 s to decrypt) never blocks the
+popup or the hotkey.
 
 ## Default shortcut and keyboard controls
 
@@ -70,10 +100,36 @@ In the popup:
 | `1`–`9` | Paste items 1–9 |
 | `0` | Paste item 10 |
 | Delete | Remove selected item |
+| Shift + Enter | Paste selected as plain text |
+| Shift + `1`-`9` / `0` | Paste that item as plain text |
+| Ctrl + P | Pin / unpin selected item |
 | `/` or Ctrl + F | Open the filter box |
 | Esc | Hide popup |
 
-Mouse click also pastes. Window deactivation hides the popup.
+Mouse click also pastes; Shift+click pastes as plain text. Window deactivation
+hides the popup.
+
+### Plain-text paste
+
+Pasting normally offers whatever the clip carries, so text copied from a browser or
+Word brings its HTML and RTF styling with it. **Paste as plain text** in Settings makes
+text-only the default, and **Shift inverts whichever way that setting is set** — so the
+other behaviour is always one modifier away.
+
+Clips with no text at all — images and file drops — restore normally even when plain
+text is requested. There is no useful "plain" form of those, and pasting nothing would
+be worse.
+
+### Pinned clips
+
+`Ctrl + P` pins the selected clip. Pinned clips sort to the top, show a marker, and are
+never evicted: the history limit counts unpinned clips only, so the visible list can
+exceed it by however many clips you have pinned. Pinning every slot cannot stop capture
+— new clips still arrive and push each other out. Unpinning returns a clip to its normal
+position by recency.
+
+Pin state lives in `index.json`. A history rebuilt from folders after a corrupt index
+loses it, along with the timestamps and hashes that recovery already cannot restore.
 
 ### Filtering
 
@@ -273,6 +329,25 @@ the system tray, shortcuts, portable builds, and installer packages.
 ### Capture responsiveness
 - Copy a large image or a ~100 MB file
 - Confirm the popup still opens instantly and the hotkey responds during capture
+- Paste that large image back; confirm the popup does not freeze while it decrypts
+
+### Plain-text paste
+- Copy styled text from a browser; paste with Enter into WordPad (styling kept)
+- Paste with Shift+Enter (styling stripped)
+- Enable **Paste as plain text**; confirm Enter and Shift+Enter swap behaviour
+- Shift+click and Shift+`1` behave the same as Shift+Enter
+- Confirm an image clip still pastes when plain text is requested
+
+### Pinning
+- `Ctrl + P` pins the selected clip; it moves to the top with a marker
+- Copy past the history limit; confirm the pinned clip survives
+- Unpin; confirm it returns to its position by recency
+- Restart; confirm pins persist
+
+### Encryption
+- With **Encrypt history on disk** on, copy text, then open `items\<guid>\text.txt`
+- Confirm the file is not readable and the clip still pastes correctly
+- Turn the setting off, copy again, and confirm both old and new clips still paste
 
 ### Popup / hotkey / tray / updates
 - Mouse, arrows, Enter, `1`–`0`, Esc, Delete
@@ -302,3 +377,7 @@ Capture runs in two phases, split at `ClipboardSnapshot`:
 Everything crossing that boundary is immutable or frozen, which is what makes phase 2
 safe off-thread. Freezing the clipboard bitmap in phase 1 is load-bearing — a bitmap that
 cannot be frozen is dropped rather than passed across threads.
+
+Restore is split the same way at `RestorePayloads`: read and decrypt on the thread pool,
+then assemble and publish the `DataObject` on the STA thread. Without that split, DPAPI
+decryption of a large image would stall the dispatcher for seconds during paste.

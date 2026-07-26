@@ -237,11 +237,21 @@ public sealed class HistoryStore
         return evicted;
     }
 
-    /// <summary>Keeps pinned items above unpinned ones without disturbing relative order.</summary>
+    /// <summary>
+    /// Pinned clips first, then everything by recency.
+    /// </summary>
+    /// <remarks>
+    /// Ordering by LastUsedUtc rather than just preserving position matters on unpin: a
+    /// stable sort alone would strand the clip at the top of the list it was promoted to,
+    /// leaving the oldest clip sitting above newer ones. Sorting on recency sends it back
+    /// to where it belongs, and makes the order deterministic regardless of how the list
+    /// was reached.
+    /// </remarks>
     private void SortPinnedFirst_NoLock()
     {
         _index.Items = _index.Items
             .OrderByDescending(i => i.IsPinned)
+            .ThenByDescending(i => i.LastUsedUtc)
             .ToList();
     }
 

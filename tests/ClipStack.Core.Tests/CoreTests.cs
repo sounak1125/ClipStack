@@ -861,6 +861,25 @@ public class PinnedItemTests
     }
 
     [TestMethod]
+    public void Unpinning_ReturnsTheClipToItsRecencyPosition()
+    {
+        Add("oldest");
+        Add("middle");
+        Add("newest");
+
+        var oldest = _store.Items.Last();
+        _store.TogglePin(oldest.Id);
+        Assert.AreEqual(oldest.Id, _store.Items[0].Id, "pinning should promote it");
+
+        _store.TogglePin(oldest.Id);
+
+        // A stable sort alone would strand it at the top, leaving the oldest clip above
+        // newer ones.
+        Assert.AreEqual(oldest.Id, _store.Items.Last().Id, "unpinning should send it back");
+        Assert.AreEqual("newest", _store.Items[0].PreviewText);
+    }
+
+    [TestMethod]
     public void HistoryLimit_CountsUnpinnedOnly()
     {
         var pinned = Add("pinned");
