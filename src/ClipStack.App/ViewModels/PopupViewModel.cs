@@ -125,12 +125,14 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
         _thumbnailLoadAttempted = true;
         try
         {
-            var path = _store.ResolveThumbnailPath(Item);
-            if (path is null) return;
+            // Read through the store rather than opening the file: payloads are encrypted
+            // at rest, and only the store knows how to unwrap them.
+            var bytes = _store.ReadPayloadBytes(Item, ClipboardFormatKind.ThumbnailPng);
+            if (bytes is not { Length: > 0 }) return;
 
             // Assign the field, not the property: the getter that called us is about to
             // return it, so raising PropertyChanged mid-binding would be pointless churn.
-            _thumbnail = ThumbnailService.LoadFrozenThumbnail(path);
+            _thumbnail = ThumbnailService.LoadFrozenFromBytes(bytes);
         }
         catch (Exception ex)
         {

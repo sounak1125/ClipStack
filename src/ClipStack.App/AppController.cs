@@ -35,6 +35,8 @@ internal sealed class AppController : IDisposable
     private readonly ClipboardPopupWindow _popup;
     private readonly SingleInstanceService _singleInstance;
     private readonly CancellationTokenSource _lifetimeCts = new();
+    private readonly NotificationCooldown _encryptionWarningCooldown = new();
+    private readonly NotificationCooldown _decryptionWarningCooldown = new();
 
     private SettingsWindow? _settingsWindow;
     private UpdateNotificationWindow? _updateNotification;
@@ -76,6 +78,7 @@ internal sealed class AppController : IDisposable
     public void Start()
     {
         ApplyTheme(_settings.Current.Theme);
+        _history.EncryptPayloads = _settings.Current.EncryptHistory;
 
         _native.Create();
         _native.StartClipboardListener();
@@ -130,6 +133,28 @@ internal sealed class AppController : IDisposable
         _updates.UpdateReady += version =>
             Application.Current.Dispatcher.Invoke(() => ShowUpdateNotification(version));
 
+        // A clip stored in the clear when the user believes it is encrypted is exactly the
+        // kind of silent downgrade that must not stay silent.
+        _history.EncryptionFailed += ex =>
+        {
+            _logger.Error("PayloadEncrypt", ex);
+            if (_encryptionWarningCooldown.TryAcquire(TimeSpan.FromMinutes(10)))
+            {
+                Application.Current.Dispatcher.Invoke(() =>
+                    _tray.ShowBalloon("Could not encrypt a clip — it was saved unencrypted."));
+            }
+        };
+
+        _history.DecryptionFailed += ex =>
+        {
+            _logger.Error("PayloadDecrypt", ex);
+            if (_decryptionWarningCooldown.TryAcquire(TimeSpan.FromMinutes(10)))
+            {
+                Application.Current.Dispatcher.Invoke(() =>
+                    _tray.ShowBalloon("A stored clip could not be decrypted on this account."));
+            }
+        };
+
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
     }
 
@@ -148,6 +173,7 @@ internal sealed class AppController : IDisposable
     private void OnSettingsChanged()
     {
         var settings = _settings.Current;
+        _history.EncryptPayloads = settings.EncryptHistory;
         _history.TrimToLimit(settings.HistoryLimit);
         _tray.RefreshMenuState();
         if (_popup.IsVisible)

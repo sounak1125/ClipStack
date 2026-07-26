@@ -5,6 +5,13 @@
     <RootNamespace>ClipStack.Core</RootNamespace>
     <AssemblyName>ClipStack.Core</AssemblyName>
     <Description>Core models and storage for ClipStack</Description>
+    <!-- DPAPI is Windows-only; ClipStack is a Windows app, so silence the portability
+         analyser rather than littering call sites with OS guards. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+  </ItemGroup>
 
 </Project>

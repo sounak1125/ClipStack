@@ -8,6 +8,36 @@ using ClipStack.Core.Utilities;
 
 namespace ClipStack.Services;
 
+/// <summary>
+/// Decrypted payload content for one clip, read off the UI thread.
+/// </summary>
+/// <remarks>
+/// This mirrors <see cref="ClipboardSnapshot"/> on the capture side. DPAPI costs roughly
+/// 50 ms per megabyte, so decrypting a large image inline would stall the dispatcher for
+/// seconds — the exact freeze the off-thread capture work removed. Bitmaps are frozen
+/// here so they can cross back to the STA thread.
+/// </remarks>
+internal sealed class RestorePayloads
+{
+    public string? Text { get; init; }
+    public string? Html { get; init; }
+    public string? Rtf { get; init; }
+    public BitmapSource? Image { get; init; }
+
+    /// <summary>Raw PNG bytes, offered alongside the bitmap for apps that prefer them.</summary>
+    public byte[]? Png { get; init; }
+
+    public string[] ExistingFiles { get; init; } = [];
+    public bool MissingAllFiles { get; init; }
+
+    public bool HasAny =>
+        !string.IsNullOrEmpty(Text)
+        || !string.IsNullOrEmpty(Html)
+        || !string.IsNullOrEmpty(Rtf)
+        || Image is not null
+        || ExistingFiles.Length > 0;
+}
+
 internal sealed class ClipboardRestoreService
 {
     private static readonly int[] RetryDelaysMs = [20, 40, 80, 120, 180, 250];
@@ -30,10 +60,16 @@ internal sealed class ClipboardRestoreService
     {
         try
         {
-            var data = BuildDataObject(item, plainTextOnly, out var missingAllFiles);
-            if (missingAllFiles)
+            // Phase 1: read and decrypt off the UI thread.
+            var payloads = await Task
+                .Run(() => LoadPayloads(item, plainTextOnly), cancellationToken)
+                .ConfigureAwait(true);
+
+            if (payloads.MissingAllFiles)
                 return RestoreResult.Fail("Files are no longer available.");
 
+            // Phase 2: assemble and publish on the STA thread. Only cheap work here.
+            var data = BuildDataObject(payloads);
             if (data is null)
                 return RestoreResult.Fail("Could not restore this item.");
 
@@ -60,6 +96,10 @@ internal sealed class ClipboardRestoreService
 
             return RestoreResult.Fail("Clipboard is busy. Try again.");
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.Error("RestoreItem", ex);
@@ -67,121 +107,61 @@ internal sealed class ClipboardRestoreService
         }
     }
 
-    private DataObject? BuildDataObject(ClipboardItem item, bool plainTextOnly, out bool missingAllFiles)
+    private RestorePayloads LoadPayloads(ClipboardItem item, bool plainTextOnly)
     {
-        missingAllFiles = false;
-        var data = new DataObject();
-        var hasAny = false;
+        var text = _history.ReadPayloadText(item, ClipboardFormatKind.UnicodeText)
+                   ?? _history.ReadPayloadText(item, ClipboardFormatKind.Text);
 
         // Plain-text paste: for a clip that carries text, offer only the text formats so
         // the target application cannot pick up the source's HTML or RTF styling. Clips
         // with no text at all (images, file drops) still restore normally — there is no
         // useful "plain" form of those, and silently pasting nothing would be worse.
-        if (plainTextOnly)
-        {
-            var plain = _history.ReadPayloadText(item, ClipboardFormatKind.UnicodeText)
-                        ?? _history.ReadPayloadText(item, ClipboardFormatKind.Text);
-
-            if (!string.IsNullOrEmpty(plain))
-            {
-                data.SetText(plain, TextDataFormat.UnicodeText);
-                try { data.SetText(plain, TextDataFormat.Text); } catch { /* ignore */ }
-                return data;
-            }
-        }
+        if (plainTextOnly && !string.IsNullOrEmpty(text))
+            return new RestorePayloads { Text = text };
 
         var hasImagePayload = item.Payloads.Any(p =>
             p.Format is ClipboardFormatKind.ImagePng or ClipboardFormatKind.ImageOriginal);
+
+        var existingFiles = Array.Empty<string>();
+        var missingAllFiles = false;
 
         // File-only items require at least one existing path.
         // Image items with stored pixels can still paste when source files are gone.
         if (item.DominantKind == ClipboardItemKind.Files || item.FilePaths.Count > 0)
         {
-            var existing = item.FilePaths.Where(File.Exists).ToArray();
-            if (existing.Length == 0 && item.FilePaths.Count > 0 && !hasImagePayload)
-            {
-                missingAllFiles = true;
-                return null;
-            }
-
-            if (existing.Length > 0)
-            {
-                var collection = new StringCollection();
-                collection.AddRange(existing);
-                data.SetFileDropList(collection);
-                hasAny = true;
-            }
+            existingFiles = item.FilePaths.Where(File.Exists).ToArray();
+            if (existingFiles.Length == 0 && item.FilePaths.Count > 0 && !hasImagePayload)
+                return new RestorePayloads { MissingAllFiles = true };
         }
 
-        var text = _history.ReadPayloadText(item, ClipboardFormatKind.UnicodeText)
-                   ?? _history.ReadPayloadText(item, ClipboardFormatKind.Text);
-        if (!string.IsNullOrEmpty(text))
-        {
-            data.SetText(text, TextDataFormat.UnicodeText);
-            try { data.SetText(text, TextDataFormat.Text); } catch { /* ignore */ }
-            hasAny = true;
-        }
+        BitmapSource? image = null;
+        byte[]? png = null;
 
-        var html = _history.ReadPayloadText(item, ClipboardFormatKind.Html);
-        if (!string.IsNullOrEmpty(html))
-        {
-            data.SetData(DataFormats.Html, html);
-            hasAny = true;
-        }
-
-        var rtf = _history.ReadPayloadText(item, ClipboardFormatKind.Rtf);
-        if (!string.IsNullOrEmpty(rtf))
-        {
-            data.SetData(DataFormats.Rtf, rtf);
-            hasAny = true;
-        }
-
-        if (TryAttachImage(data, item))
-            hasAny = true;
-
-        return hasAny ? data : null;
-    }
-
-    private bool TryAttachImage(DataObject data, ClipboardItem item)
-    {
         try
         {
             var original = _history.ReadPayloadBytes(item, ClipboardFormatKind.ImageOriginal);
             if (original is { Length: > 0 })
             {
-                var bitmap = ThumbnailService.LoadFrozenFromBytes(original);
-                if (bitmap is not null)
-                {
-                    data.SetImage(bitmap);
-                    // Also expose raw PNG when the original is already PNG for apps that prefer it.
-                    var originalPayload = item.Payloads.FirstOrDefault(p => p.Format == ClipboardFormatKind.ImageOriginal);
-                    if (originalPayload is not null
-                        && originalPayload.RelativePath.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
-                    {
-                        try
-                        {
-                            data.SetData("PNG", new MemoryStream(original));
-                        }
-                        catch { /* optional */ }
-                    }
+                image = ThumbnailService.LoadFrozenFromBytes(original);
 
-                    return true;
+                // Expose raw PNG only when the original genuinely is one.
+                var originalPayload = item.Payloads.FirstOrDefault(p => p.Format == ClipboardFormatKind.ImageOriginal);
+                if (image is not null
+                    && originalPayload is not null
+                    && originalPayload.RelativePath.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+                {
+                    png = original;
                 }
             }
 
-            var pngBytes = _history.ReadPayloadBytes(item, ClipboardFormatKind.ImagePng);
-            if (pngBytes is { Length: > 0 })
+            if (image is null)
             {
-                var bitmap = ThumbnailService.LoadFrozenFromBytes(pngBytes);
-                if (bitmap is not null)
+                var pngBytes = _history.ReadPayloadBytes(item, ClipboardFormatKind.ImagePng);
+                if (pngBytes is { Length: > 0 })
                 {
-                    data.SetImage(bitmap);
-                    try
-                    {
-                        data.SetData("PNG", new MemoryStream(pngBytes));
-                    }
-                    catch { /* optional */ }
-                    return true;
+                    image = ThumbnailService.LoadFrozenFromBytes(pngBytes);
+                    if (image is not null)
+                        png = pngBytes;
                 }
             }
         }
@@ -190,7 +170,55 @@ internal sealed class ClipboardRestoreService
             _logger.Error("RestoreImage", ex);
         }
 
-        return false;
+        return new RestorePayloads
+        {
+            Text = text,
+            Html = _history.ReadPayloadText(item, ClipboardFormatKind.Html),
+            Rtf = _history.ReadPayloadText(item, ClipboardFormatKind.Rtf),
+            Image = image,
+            Png = png,
+            ExistingFiles = existingFiles,
+            MissingAllFiles = missingAllFiles,
+        };
+    }
+
+    private static DataObject? BuildDataObject(RestorePayloads payloads)
+    {
+        if (!payloads.HasAny)
+            return null;
+
+        var data = new DataObject();
+
+        if (payloads.ExistingFiles.Length > 0)
+        {
+            var collection = new StringCollection();
+            collection.AddRange(payloads.ExistingFiles);
+            data.SetFileDropList(collection);
+        }
+
+        if (!string.IsNullOrEmpty(payloads.Text))
+        {
+            data.SetText(payloads.Text, TextDataFormat.UnicodeText);
+            try { data.SetText(payloads.Text, TextDataFormat.Text); } catch { /* ignore */ }
+        }
+
+        if (!string.IsNullOrEmpty(payloads.Html))
+            data.SetData(DataFormats.Html, payloads.Html);
+
+        if (!string.IsNullOrEmpty(payloads.Rtf))
+            data.SetData(DataFormats.Rtf, payloads.Rtf);
+
+        if (payloads.Image is not null)
+        {
+            data.SetImage(payloads.Image);
+            if (payloads.Png is { Length: > 0 })
+            {
+                try { data.SetData("PNG", new MemoryStream(payloads.Png)); }
+                catch { /* optional */ }
+            }
+        }
+
+        return data;
     }
 }
 

@@ -530,7 +530,10 @@ public class ImageOriginalHashTests
             var path = store.ResolvePayloadPath(added, added.Payloads[0]);
             Assert.IsTrue(path.EndsWith("original.jpg", StringComparison.OrdinalIgnoreCase));
             Assert.IsTrue(File.Exists(path));
-            CollectionAssert.AreEqual(bytes, File.ReadAllBytes(path));
+
+            // Payloads are encrypted at rest, so read back through the store rather than
+            // comparing raw file bytes.
+            CollectionAssert.AreEqual(bytes, store.ReadPayloadBytes(added, ClipboardFormatKind.ImageOriginal));
 
             var reloaded = new HistoryStore(new StoragePaths(root));
             reloaded.Initialize();
@@ -611,6 +614,167 @@ public class ClipboardExclusionFormatsTests
         var stream = new MemoryStream(new byte[] { 1, 0, 0, 0 });
         stream.ReadByte();
         Assert.IsTrue(ClipboardExclusionFormats.PolicyValueAllowsCapture(stream));
+    }
+}
+
+[TestClass]
+public class PayloadEncryptionTests
+{
+    private string _root = null!;
+
+    [TestInitialize]
+    public void Init()
+    {
+        _root = Path.Combine(Path.GetTempPath(), "ClipStackTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_root);
+    }
+
+    [TestCleanup]
+    public void Cleanup()
+    {
+        try { if (Directory.Exists(_root)) Directory.Delete(_root, true); } catch { }
+    }
+
+    private static ClipboardItem Add(HistoryStore store, string text)
+    {
+        var bytes = Encoding.UTF8.GetBytes(text);
+        return store.AddOrPromote(new NewClipboardItemData
+        {
+            DominantKind = ClipboardItemKind.Text,
+            ContentHash = ContentHasher.ComputeHash([(ClipboardFormatKind.UnicodeText, bytes)]),
+            PreviewText = text,
+            CharacterCount = text.Length,
+            Payloads = [new PayloadWriteRequest { Format = ClipboardFormatKind.UnicodeText, Bytes = bytes }],
+        }, 10).Item;
+    }
+
+    [TestMethod]
+    public void Protect_RoundTrips()
+    {
+        var plain = Encoding.UTF8.GetBytes("correct horse battery staple");
+        var sealed_ = PayloadProtector.Protect(plain);
+
+        Assert.IsTrue(PayloadProtector.IsProtected(sealed_));
+        CollectionAssert.AreNotEqual(plain, sealed_);
+        CollectionAssert.AreEqual(plain, PayloadProtector.Unprotect(sealed_));
+    }
+
+    [TestMethod]
+    public void Unprotect_PassesPlaintextThrough()
+    {
+        // Payloads written before encryption existed carry no header and must stay readable.
+        var legacy = Encoding.UTF8.GetBytes("written by an older build");
+        Assert.IsFalse(PayloadProtector.IsProtected(legacy));
+        CollectionAssert.AreEqual(legacy, PayloadProtector.Unprotect(legacy));
+    }
+
+    [TestMethod]
+    public void Protect_LeavesEmptyInputAlone()
+    {
+        var empty = Array.Empty<byte>();
+        Assert.AreSame(empty, PayloadProtector.Protect(empty));
+        Assert.IsFalse(PayloadProtector.IsProtected(empty));
+    }
+
+    [TestMethod]
+    public void StoredPayload_IsNotReadableAsPlaintextOnDisk()
+    {
+        var store = new HistoryStore(new StoragePaths(_root)) { EncryptPayloads = true };
+        store.Initialize();
+
+        const string secret = "SECRET-not-on-disk-in-the-clear";
+        var item = Add(store, secret);
+
+        var onDisk = File.ReadAllBytes(store.ResolvePayloadPath(item, item.Payloads[0]));
+        Assert.IsTrue(PayloadProtector.IsProtected(onDisk));
+
+        var raw = Encoding.UTF8.GetString(onDisk);
+        Assert.IsFalse(raw.Contains(secret, StringComparison.Ordinal), "secret found in the payload file");
+
+        // ...but the store still returns it.
+        Assert.AreEqual(secret, store.ReadPayloadText(item, ClipboardFormatKind.UnicodeText));
+        Assert.IsTrue(item.Payloads[0].Encrypted);
+    }
+
+    [TestMethod]
+    public void EncryptedHistory_SurvivesReload()
+    {
+        var store = new HistoryStore(new StoragePaths(_root)) { EncryptPayloads = true };
+        store.Initialize();
+        var item = Add(store, "persisted secret");
+
+        var reloaded = new HistoryStore(new StoragePaths(_root));
+        reloaded.Initialize();
+
+        Assert.AreEqual("persisted secret", reloaded.ReadPayloadText(reloaded.GetById(item.Id)!, ClipboardFormatKind.UnicodeText));
+    }
+
+    [TestMethod]
+    public void ExistingPlaintextItems_StayReadableAfterEnablingEncryption()
+    {
+        // The upgrade path: history written unencrypted, then encryption switched on.
+        var plainStore = new HistoryStore(new StoragePaths(_root)) { EncryptPayloads = false };
+        plainStore.Initialize();
+        var legacy = Add(plainStore, "written before encryption");
+
+        var onDisk = File.ReadAllBytes(plainStore.ResolvePayloadPath(legacy, legacy.Payloads[0]));
+        Assert.IsFalse(PayloadProtector.IsProtected(onDisk));
+        Assert.IsFalse(legacy.Payloads[0].Encrypted);
+
+        var upgraded = new HistoryStore(new StoragePaths(_root)) { EncryptPayloads = true };
+        upgraded.Initialize();
+
+        // Old clip readable...
+        Assert.AreEqual(
+            "written before encryption",
+            upgraded.ReadPayloadText(upgraded.GetById(legacy.Id)!, ClipboardFormatKind.UnicodeText));
+
+        // ...and new clips encrypted alongside it.
+        var fresh = Add(upgraded, "written after encryption");
+        Assert.IsTrue(fresh.Payloads[0].Encrypted);
+        Assert.AreEqual("written after encryption", upgraded.ReadPayloadText(fresh, ClipboardFormatKind.UnicodeText));
+    }
+
+    [TestMethod]
+    public void DisablingEncryption_LeavesEarlierEncryptedClipsReadable()
+    {
+        var store = new HistoryStore(new StoragePaths(_root)) { EncryptPayloads = true };
+        store.Initialize();
+        var encrypted = Add(store, "encrypted clip");
+
+        store.EncryptPayloads = false;
+        var plain = Add(store, "plain clip");
+
+        Assert.AreEqual("encrypted clip", store.ReadPayloadText(store.GetById(encrypted.Id)!, ClipboardFormatKind.UnicodeText));
+        Assert.AreEqual("plain clip", store.ReadPayloadText(plain, ClipboardFormatKind.UnicodeText));
+        Assert.IsFalse(plain.Payloads[0].Encrypted);
+    }
+
+    [TestMethod]
+    public void CorruptCiphertext_ReportsFailureInsteadOfReturningGarbage()
+    {
+        var store = new HistoryStore(new StoragePaths(_root)) { EncryptPayloads = true };
+        store.Initialize();
+        var item = Add(store, "will be corrupted");
+
+        var path = store.ResolvePayloadPath(item, item.Payloads[0]);
+        var bytes = File.ReadAllBytes(path);
+        bytes[^1] ^= 0xFF;
+        bytes[^2] ^= 0xFF;
+        File.WriteAllBytes(path, bytes);
+
+        Exception? reported = null;
+        store.DecryptionFailed += ex => reported = ex;
+
+        Assert.IsNull(store.ReadPayloadBytes(store.GetById(item.Id)!, ClipboardFormatKind.UnicodeText));
+        Assert.IsNotNull(reported, "DecryptionFailed should have been raised");
+    }
+
+    [TestMethod]
+    public void EncryptHistorySetting_DefaultsOnAndRoundTrips()
+    {
+        Assert.IsTrue(new AppSettings().EncryptHistory);
+        Assert.IsFalse(new AppSettings { EncryptHistory = false }.Clone().EncryptHistory);
     }
 }
 

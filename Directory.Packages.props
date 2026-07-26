@@ -5,5 +5,6 @@
   <ItemGroup>
     <PackageVersion Include="Velopack" Version="1.2.0" />
     <PackageVersion Include="MSTest" Version="4.0.2" />
+    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.10" />
   </ItemGroup>
 </Project>

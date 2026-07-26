@@ -502,6 +502,12 @@
               <TextBlock Text="Notifications" Style="{StaticResource SettingTitle}" />
             </CheckBox>
 
+            <CheckBox x:Name="EncryptHistory"
+                      Style="{StaticResource ToggleSetting}"
+                      AutomationProperties.Name="Encrypt history on disk">
+              <TextBlock Text="Encrypt history on disk" Style="{StaticResource SettingTitle}" />
+            </CheckBox>
+
             <CheckBox x:Name="ClearOnExit"
                       Style="{StaticResource ToggleSetting}"
                       AutomationProperties.Name="Clear on exit">

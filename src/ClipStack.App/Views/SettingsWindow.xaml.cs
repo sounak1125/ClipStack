@@ -73,6 +73,7 @@ public partial class SettingsWindow : Window
         PasteAsPlainText.IsChecked = s.PasteAsPlainText;
         ShowNotifications.IsChecked = s.ShowTrayNotifications;
         ClearOnExit.IsChecked = s.ClearHistoryOnExit;
+        EncryptHistory.IsChecked = s.EncryptHistory;
         HistoryLimit.Text = s.HistoryLimit.ToString();
         MaxSizeMb.Text = s.MaxItemSizeBytes <= 0 ? "0" : (s.MaxItemSizeBytes / (1024.0 * 1024.0)).ToString("0.##");
         CaptureText.IsChecked = s.CaptureText;
@@ -427,6 +428,7 @@ public partial class SettingsWindow : Window
             s.PasteAsPlainText = PasteAsPlainText.IsChecked == true;
             s.ShowTrayNotifications = ShowNotifications.IsChecked == true;
             s.ClearHistoryOnExit = ClearOnExit.IsChecked == true;
+            s.EncryptHistory = EncryptHistory.IsChecked == true;
             s.HistoryLimit = limit;
             s.MaxItemSizeBytes = mb <= 0 ? 0 : (long)(mb * 1024 * 1024);
             s.CaptureText = CaptureText.IsChecked == true;

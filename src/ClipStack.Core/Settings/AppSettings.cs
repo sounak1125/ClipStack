@@ -26,6 +26,12 @@ public sealed class AppSettings
 
     public bool ClearHistoryOnExit { get; set; }
 
+    /// <summary>
+    /// Encrypt payload files at rest with DPAPI under the current Windows account.
+    /// Reads always handle both forms, so toggling this never orphans existing clips.
+    /// </summary>
+    public bool EncryptHistory { get; set; } = true;
+
     public bool CaptureText { get; set; } = true;
 
     public bool CaptureRichText { get; set; } = true;
@@ -73,6 +79,7 @@ public sealed class AppSettings
         HistoryLimit = HistoryLimit,
         MaxItemSizeBytes = MaxItemSizeBytes,
         ClearHistoryOnExit = ClearHistoryOnExit,
+        EncryptHistory = EncryptHistory,
         CaptureText = CaptureText,
         CaptureRichText = CaptureRichText,
         CaptureImages = CaptureImages,

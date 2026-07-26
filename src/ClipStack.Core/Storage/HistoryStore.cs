@@ -18,6 +18,15 @@ public sealed class HistoryStore
 
     public StoragePaths Paths => _paths;
 
+    /// <summary>
+    /// Whether new payloads are written encrypted. Reads always handle both, so turning
+    /// this off leaves existing encrypted clips readable and vice versa.
+    /// </summary>
+    public bool EncryptPayloads { get; set; } = true;
+
+    /// <summary>Raised when a payload could not be encrypted and was stored in the clear.</summary>
+    public event Action<Exception>? EncryptionFailed;
+
     public IReadOnlyList<ClipboardItem> Items
     {
         get
@@ -90,14 +99,40 @@ public sealed class HistoryStore
                         throw new InvalidOperationException("Unsafe payload file name.");
 
                     var fullPath = Path.Combine(tempDir, fileName);
-                    File.WriteAllBytes(fullPath, request.Bytes);
-                    totalSize += request.Bytes.LongLength;
+
+                    // Encrypt at rest. This runs on the capture background thread, so the
+                    // DPAPI cost on a large image cannot reach the UI thread.
+                    var encrypted = false;
+                    var toWrite = request.Bytes;
+                    if (EncryptPayloads)
+                    {
+                        try
+                        {
+                            toWrite = PayloadProtector.Protect(request.Bytes);
+                            encrypted = toWrite.Length != request.Bytes.Length
+                                        || PayloadProtector.IsProtected(toWrite);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Storing the clip in the clear beats losing it, but the user
+                            // must not be told it is encrypted when it is not.
+                            EncryptionFailed?.Invoke(ex);
+                            toWrite = request.Bytes;
+                            encrypted = false;
+                        }
+                    }
+
+                    File.WriteAllBytes(fullPath, toWrite);
+
+                    // SizeBytes tracks what is on disk, which is what disk-usage reports.
+                    totalSize += toWrite.LongLength;
 
                     payloads.Add(new ClipboardPayload
                     {
                         Format = request.Format,
                         RelativePath = fileName,
-                        SizeBytes = request.Bytes.LongLength,
+                        SizeBytes = toWrite.LongLength,
+                        Encrypted = encrypted,
                     });
                 }
 
@@ -317,8 +352,28 @@ public sealed class HistoryStore
         if (!File.Exists(path))
             return null;
 
-        return File.ReadAllBytes(path);
+        var stored = File.ReadAllBytes(path);
+
+        // Dispatch on the file's own header rather than the index flag, so a payload
+        // stays readable even if the index disagrees with what is on disk.
+        if (!PayloadProtector.IsProtected(stored))
+            return stored;
+
+        try
+        {
+            return PayloadProtector.Unprotect(stored);
+        }
+        catch (Exception ex)
+        {
+            // Encrypted under a different Windows account or a reset credential: the
+            // bytes are unrecoverable, so report nothing rather than garbage.
+            DecryptionFailed?.Invoke(ex);
+            return null;
+        }
     }
+
+    /// <summary>Raised when a stored payload could not be decrypted for this user.</summary>
+    public event Action<Exception>? DecryptionFailed;
 
     public string? ReadPayloadText(ClipboardItem item, ClipboardFormatKind format)
     {
@@ -433,6 +488,25 @@ public sealed class HistoryStore
         return index;
     }
 
+    /// <summary>
+    /// Reads a payload file that may or may not be encrypted. Returns null when it is
+    /// protected under credentials this user no longer has.
+    /// </summary>
+    private static byte[]? TryReadPayloadFile(string path)
+    {
+        try
+        {
+            var stored = File.ReadAllBytes(path);
+            return PayloadProtector.IsProtected(stored)
+                ? PayloadProtector.Unprotect(stored)
+                : stored;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static ClipboardItem? ReconstructItem(Guid id, string dir)
     {
         var payloads = new List<ClipboardPayload>();
@@ -482,9 +556,13 @@ public sealed class HistoryStore
         var textPath = Path.Combine(dir, PayloadFileNames.Text);
         if (File.Exists(textPath))
         {
-            var text = File.ReadAllText(textPath, Encoding.UTF8);
-            preview = TextPreview.Create(text);
-            charCount = text.Length;
+            if (TryReadPayloadFile(textPath) is { } textBytes)
+            {
+                var text = Encoding.UTF8.GetString(textBytes);
+                preview = TextPreview.Create(text);
+                charCount = text.Length;
+            }
+
             kind = File.Exists(Path.Combine(dir, PayloadFileNames.Html))
                 || File.Exists(Path.Combine(dir, PayloadFileNames.Rtf))
                 ? ClipboardItemKind.RichText
@@ -504,7 +582,11 @@ public sealed class HistoryStore
         {
             try
             {
-                files = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(filesPath), AppIdentity.JsonOptions) ?? [];
+                if (TryReadPayloadFile(filesPath) is { } fileBytes)
+                {
+                    files = JsonSerializer.Deserialize<List<string>>(
+                        Encoding.UTF8.GetString(fileBytes), AppIdentity.JsonOptions) ?? [];
+                }
             }
             catch { /* ignore */ }
 
