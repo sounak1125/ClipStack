@@ -7,9 +7,11 @@ It is a native **C# / WPF / .NET 10** desktop app (not Electron, not Chromium, n
 ## Features
 
 - Event-driven clipboard capture (`AddClipboardFormatListener`) — no polling
+- Capture work runs off the UI thread, so large images and files never freeze the popup
+- Honours password-manager clipboard opt-out formats
 - Default history of **50** items (configurable 1–50)
 - Global shortcut default: **Ctrl + Shift + S**
-- Compact floating popup near the cursor
+- Compact floating popup near the cursor, with a filter box (`/`)
 - System tray app (no taskbar window during normal use)
 - Local-only storage under `%LocalAppData%\ClipStack`
 - Velopack installer + automatic GitHub update support
@@ -23,13 +25,37 @@ It is a native **C# / WPF / .NET 10** desktop app (not Electron, not Chromium, n
 | Images | Bitmap clipboard images stored as PNG + thumbnail |
 | Files/folders | File-drop path lists only (files are not copied into ClipStack) |
 
-Private/app-specific clipboard formats are ignored safely.
+ClipStack only reads the formats above; any other app-specific format is left alone.
 
 ## Privacy
 
 Clipboard history is stored **only on this device**. ClipStack does not upload clipboard contents, does not include clipboard data in logs, and does not sync between devices.
 
 Update checks only request public ClipStack release metadata from GitHub. Clipboard contents are never included.
+
+### Excluded clips
+
+Before reading any content, ClipStack checks the clipboard for the opt-out formats that
+password managers, browsers, and banking apps use to tell history tools to skip a clip:
+
+| Format | Meaning |
+|--------|---------|
+| `ExcludeClipboardContentFromMonitorProcessing` | Presence alone excludes the clip |
+| `Clipboard Viewer Ignore` | Presence alone excludes the clip |
+| `ClipboardViewerIgnore` | Presence alone excludes the clip |
+| `CanIncludeInClipboardHistory` | DWORD; `0` excludes the clip |
+
+An excluded clip is never hashed, previewed, or written to disk — only the format name
+that triggered the skip reaches the log. A marker that is present but whose value cannot
+be parsed is treated as exclusion.
+
+`CanUploadToCloudClipboard` is deliberately **not** honoured as a local opt-out: it
+governs cross-device sync only, and Windows itself still keeps those clips in local
+history, so treating it as a storage opt-out would silently drop clips you expect to keep.
+
+This depends on the source application setting one of these formats. An app that copies a
+password without marking it — including most web pages — cannot be detected, and that clip
+is stored like any other text.
 
 ## Default shortcut and keyboard controls
 
@@ -44,9 +70,34 @@ In the popup:
 | `1`–`9` | Paste items 1–9 |
 | `0` | Paste item 10 |
 | Delete | Remove selected item |
+| `/` or Ctrl + F | Open the filter box |
 | Esc | Hide popup |
 
 Mouse click also pastes. Window deactivation hides the popup.
+
+### Filtering
+
+The list keeps focus when the popup opens, so every shortcut above works immediately.
+Press `/` (or Ctrl + F, for layouts where `/` is not on the `OemQuestion` key) to reveal
+the filter box.
+
+| Key | Action while the filter box has focus |
+|-----|----------------------------------------|
+| Any character | Types into the filter |
+| ↑ / ↓ | Change selection without leaving the box |
+| Enter | Paste selected |
+| Esc | Return focus to the list, keeping the filter applied |
+
+Terms are separated by spaces and **all** must match (AND). Matching is case-insensitive
+and runs against each clip's stored preview text, its file paths, and its kind — so
+`image` or `files` narrows by type. The header shows `matched / total` while a filter is
+active, and the numeric shortcuts renumber to the visible rows.
+
+Filtering reads only the in-memory index, never payload files on disk, so it stays
+instant across a full history. This does mean it matches the stored preview (the first
+~240 characters of a clip), not the full body of a long text clip.
+
+The filter resets every time the popup closes.
 
 ## Tray menu
 
@@ -205,6 +256,24 @@ the system tray, shortcuts, portable builds, and installer packages.
 - Copy file(s) / folder; paste into Explorer via ClipStack
 - Delete a source file; confirm missing-path handling
 
+### Excluded clips
+- Copy a password from KeePass / Bitwarden / 1Password
+- Confirm no new row appears and no folder is written under `items\`
+- Confirm `logs\clipstack.log` records only the format name, never the value
+- Copy ordinary text from the same app; confirm it still captures
+
+### Filtering
+- `/` and Ctrl + F both open the filter box
+- Type to narrow; confirm header shows `matched / total`
+- Digits and Delete edit the query instead of pasting/deleting while the box has focus
+- ↑ / ↓ and Enter still work from inside the box
+- Esc returns to the list with the filter applied; `1`–`9` then act on visible rows
+- Close and reopen; confirm the filter is cleared
+
+### Capture responsiveness
+- Copy a large image or a ~100 MB file
+- Confirm the popup still opens instantly and the hotkey responds during capture
+
 ### Popup / hotkey / tray / updates
 - Mouse, arrows, Enter, `1`–`0`, Esc, Delete
 - Multi-monitor and mixed DPI
@@ -214,7 +283,22 @@ the system tray, shortcuts, portable builds, and installer packages.
 
 ## Architecture notes
 
-- `ClipStack.Core` — models, hashing, atomic JSON storage (no WPF)
+- `ClipStack.Core` — models, hashing, search predicate, atomic JSON storage (no WPF)
 - `ClipStack.App` — tray, WPF popup/settings, Win32 interop, Velopack
 - Hidden `HwndSource` window owns clipboard listener + hotkey
 - Self-copy suppression avoids restoring history items as new duplicates
+
+### Capture threading
+
+Capture runs in two phases, split at `ClipboardSnapshot`:
+
+1. **Read** (`ClipboardFormatReader.ReadSnapshotAsync`) — UI/STA thread. Checks the
+   exclusion formats, then marshals clipboard data into strings, byte arrays, and a
+   *frozen* `BitmapSource`. STA is required here; the work is just marshalling.
+2. **Build** (`ClipboardFormatReader.BuildItemData`) plus `HistoryStore.AddOrPromote` —
+   thread pool, via `Task.Run`. Reads original image files, generates thumbnails, encodes
+   PNGs, hashes with SHA-256, and writes payloads to disk.
+
+Everything crossing that boundary is immutable or frozen, which is what makes phase 2
+safe off-thread. Freezing the clipboard bitmap in phase 1 is load-bearing — a bitmap that
+cannot be frozen is dropped rather than passed across threads.

@@ -544,3 +544,146 @@ public class ImageOriginalHashTests
         }
     }
 }
+
+[TestClass]
+public class ClipboardExclusionFormatsTests
+{
+    [TestMethod]
+    public void PresenceMarkers_CoverKnownPasswordManagerFormats()
+    {
+        CollectionAssert.Contains(
+            ClipboardExclusionFormats.PresenceMarkers,
+            "ExcludeClipboardContentFromMonitorProcessing");
+        CollectionAssert.Contains(ClipboardExclusionFormats.PresenceMarkers, "Clipboard Viewer Ignore");
+        CollectionAssert.Contains(ClipboardExclusionFormats.PresenceMarkers, "ClipboardViewerIgnore");
+    }
+
+    [TestMethod]
+    public void PolicyMarkers_CoverClipboardHistoryOptOut_ButNotCloudSync()
+    {
+        CollectionAssert.Contains(ClipboardExclusionFormats.PolicyMarkers, "CanIncludeInClipboardHistory");
+
+        // Cloud-sync opt-out is a weaker signal: Windows still keeps those clips locally,
+        // so honouring it here would silently drop clips the user expects to keep.
+        CollectionAssert.DoesNotContain(ClipboardExclusionFormats.PolicyMarkers, "CanUploadToCloudClipboard");
+    }
+
+    [TestMethod]
+    public void PolicyValue_Zero_Excludes_NonZero_Allows()
+    {
+        Assert.IsFalse(ClipboardExclusionFormats.PolicyValueAllowsCapture(0));
+        Assert.IsTrue(ClipboardExclusionFormats.PolicyValueAllowsCapture(1));
+        Assert.IsFalse(ClipboardExclusionFormats.PolicyValueAllowsCapture(false));
+        Assert.IsTrue(ClipboardExclusionFormats.PolicyValueAllowsCapture(true));
+        Assert.IsFalse(ClipboardExclusionFormats.PolicyValueAllowsCapture("0"));
+        Assert.IsTrue(ClipboardExclusionFormats.PolicyValueAllowsCapture("1"));
+    }
+
+    [TestMethod]
+    public void PolicyValue_FailsClosed_WhenUnreadable()
+    {
+        // A marker present but unparseable must exclude: the app set it deliberately.
+        Assert.IsFalse(ClipboardExclusionFormats.PolicyValueAllowsCapture(null));
+        Assert.IsFalse(ClipboardExclusionFormats.PolicyValueAllowsCapture(new object()));
+        Assert.IsFalse(ClipboardExclusionFormats.PolicyValueAllowsCapture("not-a-number"));
+        Assert.IsFalse(ClipboardExclusionFormats.PolicyValueAllowsCapture(Array.Empty<byte>()));
+        Assert.IsFalse(ClipboardExclusionFormats.PolicyValueAllowsCapture(new byte[] { 1, 0, 0, 0, 0 }));
+    }
+
+    [TestMethod]
+    public void PolicyValue_ReadsDwordBytes()
+    {
+        Assert.IsFalse(ClipboardExclusionFormats.PolicyValueAllowsCapture(new byte[] { 0, 0, 0, 0 }));
+        Assert.IsTrue(ClipboardExclusionFormats.PolicyValueAllowsCapture(new byte[] { 1, 0, 0, 0 }));
+        Assert.IsFalse(ClipboardExclusionFormats.BytesAllowCapture(ReadOnlySpan<byte>.Empty));
+    }
+
+    [TestMethod]
+    public void PolicyValue_ReadsDwordStream()
+    {
+        Assert.IsFalse(ClipboardExclusionFormats.PolicyValueAllowsCapture(new MemoryStream(new byte[] { 0, 0, 0, 0 })));
+        Assert.IsTrue(ClipboardExclusionFormats.PolicyValueAllowsCapture(new MemoryStream(new byte[] { 1, 0, 0, 0 })));
+    }
+
+    [TestMethod]
+    public void PolicyValue_RewindsStream_SoAPartiallyReadValueStillParses()
+    {
+        var stream = new MemoryStream(new byte[] { 1, 0, 0, 0 });
+        stream.ReadByte();
+        Assert.IsTrue(ClipboardExclusionFormats.PolicyValueAllowsCapture(stream));
+    }
+}
+
+[TestClass]
+public class ClipboardSearchTests
+{
+    private static ClipboardItem Item(
+        string preview,
+        ClipboardItemKind kind = ClipboardItemKind.Text,
+        params string[] filePaths) => new()
+        {
+            Id = Guid.NewGuid(),
+            PreviewText = preview,
+            DominantKind = kind,
+            FilePaths = [.. filePaths],
+        };
+
+    [TestMethod]
+    public void ParseTerms_SplitsOnWhitespace()
+    {
+        CollectionAssert.AreEqual(new[] { "alpha", "beta" }, ClipboardSearch.ParseTerms("  alpha   beta "));
+        Assert.IsEmpty(ClipboardSearch.ParseTerms("   "));
+        Assert.IsEmpty(ClipboardSearch.ParseTerms(null));
+    }
+
+    [TestMethod]
+    public void EmptyQuery_MatchesEverything()
+    {
+        Assert.IsTrue(ClipboardSearch.Matches(Item("anything"), ""));
+        Assert.IsTrue(ClipboardSearch.Matches(Item("anything"), "   "));
+        Assert.IsTrue(ClipboardSearch.Matches(Item("anything"), (string?)null));
+    }
+
+    [TestMethod]
+    public void Matches_PreviewText_CaseInsensitively()
+    {
+        var item = Item("Invoice_2026_Q3.pdf");
+        Assert.IsTrue(ClipboardSearch.Matches(item, "invoice"));
+        Assert.IsTrue(ClipboardSearch.Matches(item, "Q3"));
+        Assert.IsFalse(ClipboardSearch.Matches(item, "receipt"));
+    }
+
+    [TestMethod]
+    public void MultipleTerms_AllMustMatch()
+    {
+        var item = Item("quarterly revenue summary");
+        Assert.IsTrue(ClipboardSearch.Matches(item, "revenue summary"));
+        Assert.IsTrue(ClipboardSearch.Matches(item, "summary quarterly"));
+        Assert.IsFalse(ClipboardSearch.Matches(item, "revenue missing"));
+    }
+
+    [TestMethod]
+    public void Matches_FilePaths_NotJustThePreview()
+    {
+        // A Files clip previews only the first two names, so paths must be searchable.
+        var item = Item("a.txt, b.txt", ClipboardItemKind.Files, @"C:\reports\a.txt", @"C:\reports\z.txt");
+        Assert.IsTrue(ClipboardSearch.Matches(item, "reports"));
+        Assert.IsTrue(ClipboardSearch.Matches(item, "z.txt"));
+    }
+
+    [TestMethod]
+    public void Matches_KindLabel_SoTypingImageNarrowsByKind()
+    {
+        Assert.IsTrue(ClipboardSearch.Matches(Item("screenshot", ClipboardItemKind.Image), "image"));
+        Assert.IsTrue(ClipboardSearch.Matches(Item("a.txt", ClipboardItemKind.Files), "files"));
+        Assert.IsFalse(ClipboardSearch.Matches(Item("hello", ClipboardItemKind.Text), "image"));
+    }
+
+    [TestMethod]
+    public void Matches_ToleratesNullsFromADeserializedIndex()
+    {
+        var item = new ClipboardItem { Id = Guid.NewGuid(), PreviewText = null!, FilePaths = null! };
+        Assert.IsFalse(ClipboardSearch.Matches(item, "anything"));
+        Assert.IsTrue(ClipboardSearch.Matches(item, ""));
+    }
+}
