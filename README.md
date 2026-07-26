@@ -159,7 +159,7 @@ Approximate idle memory (does not kill an existing instance):
 Pinned package/tool version: **Velopack / vpk 1.2.0**
 
 ```powershell
-.\tools\build-release.ps1 -Version 1.0.2
+.\tools\build-release.ps1 -Version 1.0.3
 ```
 
 This will:
@@ -188,8 +188,8 @@ and the tray menu.
 Push a semantic-version tag to run the release workflow:
 
 ```powershell
-git tag v1.0.2
-git push origin v1.0.2
+git tag v1.0.3
+git push origin v1.0.3
 ```
 
 The GitHub Actions workflow downloads the previous Velopack release metadata,
