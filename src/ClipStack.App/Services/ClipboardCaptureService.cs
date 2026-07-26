@@ -75,79 +75,116 @@ internal sealed class ClipboardCaptureService
             _captureRunning = true;
         }
 
-        _ = Application.Current.Dispatcher.InvokeAsync(async () => await RunCaptureLoopAsync());
+        _ = Application.Current.Dispatcher.InvokeAsync(RunCaptureLoopAsync);
     }
 
     private async Task RunCaptureLoopAsync()
     {
         try
         {
-            do
+            while (true)
             {
-                lock (_gate) { _capturePending = false; }
+                await CaptureOnceAsync().ConfigureAwait(true);
 
-                var token = _cts.Token;
-                if (token.IsCancellationRequested || !_accepting)
-                    break;
-
-                var settings = _settings.Current;
-                if (settings.PauseCapture)
-                    continue;
-
-                NewClipboardItemData? data;
-                try
+                // Clearing _captureRunning and testing _capturePending must happen under
+                // one lock. Releasing first would let an update that arrives in between
+                // set the pending flag on a loop that is already exiting, dropping the clip.
+                lock (_gate)
                 {
-                    data = await _reader.CaptureAsync(settings, token).ConfigureAwait(true);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    _logger.Error("CaptureAsync", ex);
-                    continue;
-                }
+                    if (!_capturePending)
+                    {
+                        _captureRunning = false;
+                        return;
+                    }
 
-                if (data is null)
-                    continue;
-
-                if (data.IsOversized())
-                {
-                    if (_oversizedCooldown.TryAcquire(TimeSpan.FromMinutes(2)))
-                        NotifyUser?.Invoke("Clipboard item skipped — exceeds size limit.");
-                    continue;
-                }
-
-                if (_suppression.ShouldIgnore(data.ContentHash))
-                    continue;
-
-                try
-                {
-                    _history.AddOrPromote(data, settings.HistoryLimit);
-                    HistoryChanged?.Invoke();
-                }
-                catch (Exception ex)
-                {
-                    _logger.Error("HistoryAdd", ex);
+                    _capturePending = false;
                 }
             }
-            while (TakePending());
         }
-        finally
+        catch (Exception ex)
         {
-            lock (_gate) { _captureRunning = false; }
+            if (ex is not OperationCanceledException)
+                _logger.Error("CaptureLoop", ex);
+
+            lock (_gate)
+            {
+                _captureRunning = false;
+                _capturePending = false;
+            }
         }
     }
 
-    private bool TakePending()
+    private async Task CaptureOnceAsync()
     {
-        lock (_gate)
+        var token = _cts.Token;
+        if (token.IsCancellationRequested || !_accepting)
+            return;
+
+        var settings = _settings.Current;
+        if (settings.PauseCapture)
+            return;
+
+        // Phase 1: STA-bound clipboard marshalling, on the UI thread.
+        ClipboardSnapshot? snapshot;
+        try
         {
-            if (!_capturePending)
-                return false;
-            _capturePending = false;
-            return true;
+            snapshot = await _reader.ReadSnapshotAsync(settings, token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("ReadSnapshot", ex);
+            return;
+        }
+
+        if (snapshot is null)
+            return;
+
+        // Phase 2: decode, resize, encode, hash and write to disk — all off the UI thread.
+        // A large image or a 200 MB file capture must never freeze the popup or the hotkey.
+        NewClipboardItemData? data;
+        try
+        {
+            data = await Task.Run(() => _reader.BuildItemData(snapshot, settings), token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("BuildItemData", ex);
+            return;
+        }
+
+        if (data is null)
+            return;
+
+        if (data.IsOversized())
+        {
+            if (_oversizedCooldown.TryAcquire(TimeSpan.FromMinutes(2)))
+                NotifyUser?.Invoke("Clipboard item skipped — exceeds size limit.");
+            return;
+        }
+
+        if (_suppression.ShouldIgnore(data.ContentHash))
+            return;
+
+        try
+        {
+            await Task.Run(() => _history.AddOrPromote(data, settings.HistoryLimit), token).ConfigureAwait(true);
+            HistoryChanged?.Invoke();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("HistoryAdd", ex);
         }
     }
 }

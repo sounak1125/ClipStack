@@ -1,4 +1,3 @@
-using System.Collections.Specialized;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -11,6 +10,37 @@ using ClipStack.Core.Storage;
 using ClipStack.Core.Utilities;
 
 namespace ClipStack.Services;
+
+/// <summary>
+/// Raw clipboard content, marshalled off the clipboard on the STA/UI thread.
+/// </summary>
+/// <remarks>
+/// Every member is a string, a byte array, or a <b>frozen</b> <see cref="BitmapSource"/>,
+/// so the snapshot can be handed to a background thread. This is the seam that keeps
+/// decoding, hashing, encoding, and disk I/O off the UI thread.
+/// </remarks>
+internal sealed class ClipboardSnapshot
+{
+    public string? Text { get; init; }
+    public string? Html { get; init; }
+    public string? Rtf { get; init; }
+
+    /// <summary>Raw bytes of the clipboard's own "PNG" format, when the source offered one.</summary>
+    public byte[]? ClipboardPng { get; init; }
+
+    /// <summary>Frozen bitmap fallback, used when no "PNG" format was offered.</summary>
+    public BitmapSource? Image { get; init; }
+
+    public IReadOnlyList<string> FilePaths { get; init; } = [];
+
+    public bool IsEmpty =>
+        string.IsNullOrEmpty(Text)
+        && string.IsNullOrEmpty(Html)
+        && string.IsNullOrEmpty(Rtf)
+        && ClipboardPng is not { Length: > 0 }
+        && Image is null
+        && FilePaths.Count == 0;
+}
 
 internal sealed class ClipboardFormatReader
 {
@@ -25,7 +55,12 @@ internal sealed class ClipboardFormatReader
         _thumbnails = thumbnails;
     }
 
-    public async Task<NewClipboardItemData?> CaptureAsync(AppSettings settings, CancellationToken cancellationToken)
+    /// <summary>
+    /// Phase 1 — must run on the STA/UI thread. Marshals clipboard formats into plain
+    /// data and returns <see langword="null"/> when there is nothing to store or the
+    /// source application opted out.
+    /// </summary>
+    public async Task<ClipboardSnapshot?> ReadSnapshotAsync(AppSettings settings, CancellationToken cancellationToken)
     {
         IDataObject? data = null;
         Exception? last = null;
@@ -42,8 +77,12 @@ internal sealed class ClipboardFormatReader
             catch (Exception ex)
             {
                 last = ex;
-                await Task.Delay(RetryDelaysMs[i], cancellationToken).ConfigureAwait(true);
             }
+
+            // Another process commonly holds the clipboard open for a few milliseconds
+            // after a copy; back off on a null result too, not just on an exception.
+            if (i < RetryDelaysMs.Length - 1)
+                await Task.Delay(RetryDelaysMs[i], cancellationToken).ConfigureAwait(true);
         }
 
         if (data is null)
@@ -53,31 +92,38 @@ internal sealed class ClipboardFormatReader
             return null;
         }
 
+        // Opt-out check runs before a single byte of content is touched.
+        if (ClipboardExclusionDetector.IsExcluded(data, _logger, out var marker))
+        {
+            _logger.Info("ClipboardExcluded", $"Skipped by format: {marker}");
+            return null;
+        }
+
         try
         {
-            return CaptureFromDataObject(data, settings);
+            var snapshot = ReadSnapshotCore(data, settings);
+            return snapshot is null || snapshot.IsEmpty ? null : snapshot;
         }
         catch (OutOfMemoryException ex)
         {
-            _logger.Error("ClipboardCaptureOom", ex);
+            _logger.Error("ClipboardReadOom", ex);
             return null;
         }
         catch (Exception ex)
         {
-            _logger.Error("ClipboardCapture", ex);
+            _logger.Error("ClipboardRead", ex);
             return null;
         }
     }
 
-    private NewClipboardItemData? CaptureFromDataObject(IDataObject data, AppSettings settings)
+    private ClipboardSnapshot? ReadSnapshotCore(IDataObject data, AppSettings settings)
     {
-        var payloads = new List<(ClipboardFormatKind Format, byte[] Bytes, string? RelativeFileName)>();
         string? text = null;
         string? html = null;
         string? rtf = null;
         byte[]? clipboardPng = null;
         BitmapSource? image = null;
-        StringCollection? files = null;
+        IReadOnlyList<string> files = [];
 
         // Read FileDrop when capturing files OR images (HQ Explorer image path).
         try
@@ -85,10 +131,7 @@ internal sealed class ClipboardFormatReader
             if ((settings.CaptureFiles || settings.CaptureImages) && data.GetDataPresent(DataFormats.FileDrop))
             {
                 if (data.GetData(DataFormats.FileDrop) is string[] arr)
-                {
-                    files = new StringCollection();
-                    files.AddRange(arr);
-                }
+                    files = arr;
             }
         }
         catch (Exception ex) { _logger.Error("ReadFileDrop", ex); }
@@ -101,6 +144,7 @@ internal sealed class ClipboardFormatReader
                 if (clipboardPng is null && data.GetDataPresent(DataFormats.Bitmap)
                     && data.GetData(DataFormats.Bitmap) is BitmapSource bmp)
                 {
+                    // Freezing here is what makes the bitmap safe to touch off-thread.
                     image = ThumbnailService.ToFrozenBitmapSource(bmp);
                 }
             }
@@ -133,9 +177,55 @@ internal sealed class ClipboardFormatReader
             catch (Exception ex) { _logger.Error("ReadRtf", ex); }
         }
 
-        if (files is { Count: > 0 })
+        if (image is { IsFrozen: false })
         {
-            var paths = ContentHasher.NormalizeFilePaths(files.Cast<string>());
+            // Could not be frozen, so it cannot cross threads — drop it rather than
+            // risk an InvalidOperationException on the background thread.
+            _logger.Warn("ReadBitmap", "Clipboard bitmap could not be frozen; ignoring image payload.");
+            image = null;
+        }
+
+        return new ClipboardSnapshot
+        {
+            Text = text,
+            Html = html,
+            Rtf = rtf,
+            ClipboardPng = clipboardPng,
+            Image = image,
+            FilePaths = files,
+        };
+    }
+
+    /// <summary>
+    /// Phase 2 — safe to run on a background thread. Decodes, resizes, encodes, and
+    /// hashes; returns the item ready for <see cref="HistoryStore.AddOrPromote"/>.
+    /// </summary>
+    public NewClipboardItemData? BuildItemData(ClipboardSnapshot snapshot, AppSettings settings)
+    {
+        try
+        {
+            return BuildItemDataCore(snapshot, settings);
+        }
+        catch (OutOfMemoryException ex)
+        {
+            _logger.Error("ClipboardBuildOom", ex);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("ClipboardBuild", ex);
+            return null;
+        }
+    }
+
+    private NewClipboardItemData? BuildItemDataCore(ClipboardSnapshot snapshot, AppSettings settings)
+    {
+        var payloads = new List<(ClipboardFormatKind Format, byte[] Bytes, string? RelativeFileName)>();
+        var text = snapshot.Text;
+
+        if (snapshot.FilePaths.Count > 0)
+        {
+            var paths = ContentHasher.NormalizeFilePaths(snapshot.FilePaths);
             if (paths.Count == 0)
                 return null;
 
@@ -178,11 +268,12 @@ internal sealed class ClipboardFormatReader
             };
         }
 
-        if (clipboardPng is { Length: > 0 })
-            return BuildImageItemFromPngBytes(clipboardPng, settings, text);
+        if (snapshot.ClipboardPng is { Length: > 0 })
+            return BuildImageItemFromPngBytes(snapshot.ClipboardPng, settings, text);
 
-        if (image is not null)
+        if (snapshot.Image is not null)
         {
+            var image = snapshot.Image;
             if (!ImageSizeGuard.IsWithinBudget(image.PixelWidth, image.PixelHeight))
             {
                 _logger.Warn("ImageTooLarge", "Rejected image dimensions");
@@ -192,6 +283,9 @@ internal sealed class ClipboardFormatReader
             var png = ThumbnailService.EncodePng(image);
             return BuildImageItemFromPngBytes(png, settings, text, image);
         }
+
+        var html = snapshot.Html;
+        var rtf = snapshot.Rtf;
 
         if (string.IsNullOrEmpty(text) && string.IsNullOrEmpty(html) && string.IsNullOrEmpty(rtf))
         {
