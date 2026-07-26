@@ -615,6 +615,74 @@ public class ClipboardExclusionFormatsTests
 }
 
 [TestClass]
+public class TextPreviewTests
+{
+    [TestMethod]
+    public void Create_TruncatesAndCollapsesWhitespace()
+    {
+        Assert.AreEqual("a b c", TextPreview.Create("a   b \t c"));
+        Assert.AreEqual(string.Empty, TextPreview.Create(null));
+        Assert.AreEqual(string.Empty, TextPreview.Create(""));
+    }
+
+    [TestMethod]
+    public void Create_KeepsAtMostThreeLines()
+    {
+        var preview = TextPreview.Create("one\ntwo\nthree\nfour\nfive");
+        Assert.IsFalse(preview.Contains("four", StringComparison.Ordinal));
+        Assert.IsTrue(preview.StartsWith("one", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void Create_DoesNotScanTheWholeStringForALongSingleLine()
+    {
+        // 8 MB on one line: the old implementation walked every character and allocated a
+        // StringBuilder the size of the input to produce a 240-character preview.
+        var huge = new string('x', 8 * 1024 * 1024);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var preview = TextPreview.Create(huge);
+        sw.Stop();
+
+        Assert.IsTrue(preview.Length <= 241, $"preview was {preview.Length} chars");
+        Assert.IsTrue(
+            sw.ElapsedMilliseconds < 200,
+            $"took {sw.ElapsedMilliseconds} ms, suggesting the whole string was scanned");
+    }
+
+    [TestMethod]
+    public void Create_StillFillsThePreviewWhenInputIsHeavilySpaced()
+    {
+        // Whitespace collapses, so the scan window must be wide enough to still yield a
+        // full preview from sparse input.
+        var spaced = string.Join(" ", Enumerable.Repeat("word", 400));
+        var preview = TextPreview.Create(spaced);
+        Assert.IsTrue(preview.Length >= 200, $"preview was only {preview.Length} chars");
+    }
+
+    [TestMethod]
+    public void NormalizeWhitespace_RespectsAnExplicitScanLimit()
+    {
+        Assert.AreEqual("abc", TextPreview.NormalizeWhitespace("abcdef", 3));
+        Assert.AreEqual(string.Empty, TextPreview.NormalizeWhitespace("abcdef", 0));
+        Assert.AreEqual("abcdef", TextPreview.NormalizeWhitespace("abcdef"));
+    }
+}
+
+[TestClass]
+public class PlainTextSettingTests
+{
+    [TestMethod]
+    public void PasteAsPlainText_DefaultsOffAndRoundTrips()
+    {
+        Assert.IsFalse(new AppSettings().PasteAsPlainText);
+
+        var settings = new AppSettings { PasteAsPlainText = true };
+        Assert.IsTrue(settings.Clone().PasteAsPlainText);
+    }
+}
+
+[TestClass]
 public class ClipboardSearchTests
 {
     private static ClipboardItem Item(

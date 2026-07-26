@@ -9,21 +9,53 @@ public static class TextPreview
         if (string.IsNullOrEmpty(text))
             return string.Empty;
 
-        var normalized = NormalizeWhitespace(text);
+        // Only the first maxChars survive, and normalisation never expands the string, so
+        // scanning a bounded window is enough. Without this a single-line 50 MB clip
+        // (minified JSON, base64, one long log line) walked every character and allocated
+        // a StringBuilder the size of the whole clipboard to produce 240 characters.
+        var scanLimit = ScanWindow(maxChars);
+        var normalized = NormalizeWhitespace(text, scanLimit);
+
         if (normalized.Length <= maxChars)
             return TruncateLines(normalized, maxLines);
 
         return TruncateLines(normalized[..maxChars].TrimEnd() + "…", maxLines);
     }
 
-    public static string NormalizeWhitespace(string text)
+    /// <summary>
+    /// How much input to read for a given preview length. Runs of whitespace collapse to
+    /// one character, so a generous multiple guarantees the window still yields a full
+    /// preview even for heavily-spaced text.
+    /// </summary>
+    private static int ScanWindow(int maxChars)
     {
-        var sb = new StringBuilder(text.Length);
+        if (maxChars <= 0)
+            return 0;
+
+        // Widened so a large maxChars cannot overflow into a negative window.
+        var window = (long)maxChars * 8;
+        return window > int.MaxValue ? int.MaxValue : (int)window;
+    }
+
+    public static string NormalizeWhitespace(string text) =>
+        NormalizeWhitespace(text, int.MaxValue);
+
+    public static string NormalizeWhitespace(string text, int scanLimit)
+    {
+        if (scanLimit <= 0 || text.Length == 0)
+            return string.Empty;
+
+        var capacity = (int)Math.Min(text.Length, (long)scanLimit);
+        var sb = new StringBuilder(capacity);
         var lastWasWs = false;
         var lineCount = 0;
+        var scanned = 0;
 
         foreach (var ch in text)
         {
+            if (scanned++ >= scanLimit)
+                break;
+
             if (ch is '\r')
                 continue;
 

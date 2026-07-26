@@ -54,8 +54,15 @@ public partial class SettingsWindow : Window
         PreviewKeyDown += OnWindowPreviewKeyDown;
         Closed += OnWindowClosed;
         LoadFromSettings();
-        _updateService.StatusChanged += () => Dispatcher.Invoke(RefreshUpdateUi);
+
+        // UpdateService lives for the whole process while this window is recreated on
+        // every open, so the handler must be released or each open leaks a dead window
+        // and its entire visual tree.
+        _updateService.StatusChanged += OnUpdateStatusChanged;
+        Closed += (_, _) => _updateService.StatusChanged -= OnUpdateStatusChanged;
     }
+
+    private void OnUpdateStatusChanged() => Dispatcher.Invoke(RefreshUpdateUi);
 
     private void LoadFromSettings()
     {
@@ -63,6 +70,7 @@ public partial class SettingsWindow : Window
         StartWithWindows.IsChecked = _startupService.IsEnabled();
         StartWithWindows.IsEnabled = _startupService.CanManageStartup;
         AutoPaste.IsChecked = s.AutoPaste;
+        PasteAsPlainText.IsChecked = s.PasteAsPlainText;
         ShowNotifications.IsChecked = s.ShowTrayNotifications;
         ClearOnExit.IsChecked = s.ClearHistoryOnExit;
         HistoryLimit.Text = s.HistoryLimit.ToString();
@@ -387,8 +395,18 @@ public partial class SettingsWindow : Window
         if (limit < AppSettings.MinHistoryLimit)
             limit = AppSettings.MinHistoryLimit;
 
-        if (!double.TryParse(MaxSizeMb.Text, out var mb))
-            mb = AppSettings.DefaultMaxItemSizeBytes / (1024.0 * 1024.0);
+        // 0 legitimately means "no limit", but a negative or unparseable entry must not
+        // silently turn into unlimited — keep whatever is already stored and say so.
+        var storedMb = _settingsStore.Current.MaxItemSizeBytes / (1024.0 * 1024.0);
+        if (!double.TryParse(MaxSizeMb.Text, out var mb) || mb < 0 || double.IsNaN(mb))
+        {
+            mb = storedMb;
+            MaxSizeMb.Text = mb <= 0 ? "0" : mb.ToString("0.##");
+            ConfirmDialog.Alert(
+                this,
+                "Size limit unchanged",
+                "Enter 0 for no limit, or a positive number of megabytes.");
+        }
 
         var wantStartup = StartWithWindows.IsChecked == true;
         if (_startupService.CanManageStartup && !_startupService.SetEnabled(wantStartup))
@@ -406,6 +424,7 @@ public partial class SettingsWindow : Window
         {
             s.StartWithWindows = wantStartup;
             s.AutoPaste = AutoPaste.IsChecked == true;
+            s.PasteAsPlainText = PasteAsPlainText.IsChecked == true;
             s.ShowTrayNotifications = ShowNotifications.IsChecked == true;
             s.ClearHistoryOnExit = ClearOnExit.IsChecked == true;
             s.HistoryLimit = limit;

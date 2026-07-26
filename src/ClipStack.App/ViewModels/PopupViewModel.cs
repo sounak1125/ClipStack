@@ -15,11 +15,13 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
     private BitmapSource? _thumbnail;
     private bool _thumbnailLoadAttempted;
     private readonly FileLogger _logger;
+    private readonly HistoryStore _store;
 
-    public ClipboardItemViewModel(ClipboardItem item, int shortcutNumber, FileLogger logger)
+    public ClipboardItemViewModel(ClipboardItem item, int shortcutNumber, HistoryStore store, FileLogger logger)
     {
         Item = item;
         ShortcutNumber = shortcutNumber;
+        _store = store;
         _logger = logger;
     }
 
@@ -76,9 +78,18 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Decoded on first read rather than up front. The ListBox virtualizes, so the binding
+    /// only touches this for rows that are actually realized — roughly four at a time
+    /// instead of all fifty on every popup open.
+    /// </summary>
     public BitmapSource? Thumbnail
     {
-        get => _thumbnail;
+        get
+        {
+            EnsureThumbnail();
+            return _thumbnail;
+        }
         private set
         {
             _thumbnail = value;
@@ -100,9 +111,10 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(MetaText));
         OnPropertyChanged(nameof(TimeText));
         OnPropertyChanged(nameof(ShowThumbnail));
+        OnPropertyChanged(nameof(Thumbnail));
     }
 
-    public void EnsureThumbnail(HistoryStore store)
+    private void EnsureThumbnail()
     {
         if (_thumbnailLoadAttempted || Kind != ClipboardItemKind.Image)
             return;
@@ -110,9 +122,12 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
         _thumbnailLoadAttempted = true;
         try
         {
-            var path = store.ResolveThumbnailPath(Item);
+            var path = _store.ResolveThumbnailPath(Item);
             if (path is null) return;
-            Thumbnail = ThumbnailService.LoadFrozenThumbnail(path);
+
+            // Assign the field, not the property: the getter that called us is about to
+            // return it, so raising PropertyChanged mid-binding would be pointless churn.
+            _thumbnail = ThumbnailService.LoadFrozenThumbnail(path);
         }
         catch (Exception ex)
         {
@@ -120,9 +135,15 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Drops the decoded bitmap when the popup hides. Deliberately silent — notifying here
+    /// would make any still-realized row re-read Thumbnail and immediately decode it again,
+    /// which is exactly the work this is trying to avoid. <see cref="Update"/> re-notifies
+    /// when the popup is next populated.
+    /// </summary>
     public void ClearThumbnail()
     {
-        Thumbnail = null;
+        _thumbnail = null;
         _thumbnailLoadAttempted = false;
     }
 
@@ -288,7 +309,7 @@ public sealed class PopupViewModel : INotifyPropertyChanged
                 }
                 else
                 {
-                    Items.Insert(i, new ClipboardItemViewModel(item, number, _logger));
+                    Items.Insert(i, new ClipboardItemViewModel(item, number, _history, _logger));
                 }
             }
         }
@@ -302,8 +323,8 @@ public sealed class PopupViewModel : INotifyPropertyChanged
         // Always highlight the newest (top) row after refresh.
         SelectedItem = Items.FirstOrDefault();
 
-        foreach (var vm in Items)
-            vm.EnsureThumbnail(_history);
+        // No eager thumbnail pass here: each row decodes on first bind, so virtualization
+        // limits the work to visible rows instead of the whole history.
 
         OnPropertyChanged(nameof(HasItems));
         OnPropertyChanged(nameof(EmptyMessage));
