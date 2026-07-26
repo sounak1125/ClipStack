@@ -201,6 +201,7 @@ internal sealed class AppController : IDisposable
         if (!_popup.IsVisible) return;
         _popup.Hide();
         _popup.Topmost = false;
+        _popupVm.ResetSearch();
         _popupVm.ClearThumbnails();
     }
 

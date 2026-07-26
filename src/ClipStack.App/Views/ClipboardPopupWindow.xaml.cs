@@ -40,11 +40,17 @@ public partial class ClipboardPopupWindow : Window
                 var selected = ViewModel?.SelectedItem;
                 if (selected is null)
                 {
-                    HistoryList.Focus();
+                    if (!IsFilterFocused)
+                        HistoryList.Focus();
                     return;
                 }
 
                 HistoryList.ScrollIntoView(selected);
+
+                // Never pull focus out of the filter box while the user is typing.
+                if (IsFilterFocused)
+                    return;
+
                 if (HistoryList.ItemContainerGenerator.ContainerFromItem(selected) is System.Windows.Controls.ListBoxItem container)
                     container.Focus();
                 else
@@ -55,6 +61,46 @@ public partial class ClipboardPopupWindow : Window
                 // Ignore layout races while the popup is closing.
             }
         }, System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    private bool IsFilterFocused => FilterBox.IsKeyboardFocusWithin;
+
+    private void ActivateFilter(PopupViewModel vm)
+    {
+        vm.IsFilterVisible = true;
+
+        // The box is collapsed until this point, so it cannot take focus until layout runs.
+        Dispatcher.BeginInvoke(() =>
+        {
+            try
+            {
+                FilterBox.Focus();
+                FilterBox.CaretIndex = FilterBox.Text.Length;
+            }
+            catch
+            {
+                // Popup may already be closing.
+            }
+        }, System.Windows.Threading.DispatcherPriority.Input);
+    }
+
+    private void ExitFilterToList(PopupViewModel vm)
+    {
+        // Keep an active filter applied — the list stays narrowed and the normal
+        // 1-9 / Delete shortcuts operate on what is visible. An empty box just collapses.
+        if (!vm.HasSearchText)
+            vm.IsFilterVisible = false;
+
+        var selected = vm.SelectedItem;
+        if (selected is not null
+            && HistoryList.ItemContainerGenerator.ContainerFromItem(selected) is System.Windows.Controls.ListBoxItem container)
+        {
+            container.Focus();
+        }
+        else
+        {
+            HistoryList.Focus();
+        }
     }
 
     private static System.Windows.Controls.ScrollViewer? FindDescendantScrollViewer(DependencyObject root)
@@ -84,6 +130,43 @@ public partial class ClipboardPopupWindow : Window
     {
         var vm = ViewModel;
         if (vm is null) return;
+
+        // While the filter box has focus it owns every key except navigation, so digits,
+        // Delete and letters edit the query instead of triggering list shortcuts.
+        if (IsFilterFocused)
+        {
+            switch (e.Key)
+            {
+                case Key.Escape:
+                    ExitFilterToList(vm);
+                    e.Handled = true;
+                    break;
+                case Key.Enter:
+                    PasteRequested?.Invoke();
+                    e.Handled = true;
+                    break;
+                case Key.Up:
+                    MoveSelection(-1);
+                    e.Handled = true;
+                    break;
+                case Key.Down:
+                    MoveSelection(1);
+                    e.Handled = true;
+                    break;
+            }
+
+            return;
+        }
+
+        // "/" is the primary filter key; Ctrl+F is the layout-independent equivalent for
+        // keyboards where "/" is not on the OemQuestion key.
+        if (e.Key is Key.OemQuestion or Key.Divide
+            || (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control))
+        {
+            ActivateFilter(vm);
+            e.Handled = true;
+            return;
+        }
 
         switch (e.Key)
         {

@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Media.Imaging;
 using ClipStack.Core.Models;
+using ClipStack.Core.Settings;
 using ClipStack.Core.Storage;
 using ClipStack.Core.Utilities;
 using ClipStack.Services;
@@ -28,7 +29,12 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
 
     public int ShortcutNumber { get; private set; }
 
-    public string ShortcutLabel => ShortcutNumber >= 10 ? "0" : ShortcutNumber.ToString();
+    public string ShortcutLabel => ShortcutNumber switch
+    {
+        10 => "0",
+        > 10 => string.Empty,
+        _ => ShortcutNumber.ToString(),
+    };
 
     public ClipboardItemKind Kind => Item.DominantKind;
 
@@ -139,7 +145,13 @@ public sealed class PopupViewModel : INotifyPropertyChanged
     private readonly FileLogger _logger;
     private ClipboardItemViewModel? _selected;
     private bool _isPaused;
-    private string _headerCount = "0 items";
+    private string _headerCount = "0";
+    private string _searchText = string.Empty;
+    private bool _isFilterVisible;
+
+    // Last values supplied by Refresh, so a keystroke in the search box can rebuild the
+    // list without the caller having to hand us settings again.
+    private int _limit = AppSettings.DefaultHistoryLimit;
 
     public PopupViewModel(HistoryStore history, FileLogger logger)
     {
@@ -175,21 +187,76 @@ public sealed class PopupViewModel : INotifyPropertyChanged
 
     public string PausedText => IsPaused ? "Paused" : string.Empty;
 
+    /// <summary>Text in the popup's filter box. Setting it rebuilds the visible list.</summary>
+    public string SearchText
+    {
+        get => _searchText;
+        set
+        {
+            var next = value ?? string.Empty;
+            if (string.Equals(_searchText, next, StringComparison.Ordinal))
+                return;
+
+            _searchText = next;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(HasSearchText));
+            Rebuild();
+        }
+    }
+
+    public bool HasSearchText => _searchText.Length > 0;
+
+    /// <summary>Whether the filter row is shown. Toggled by pressing "/" or Ctrl+F.</summary>
+    public bool IsFilterVisible
+    {
+        get => _isFilterVisible;
+        set
+        {
+            if (_isFilterVisible == value)
+                return;
+
+            _isFilterVisible = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(ShowFilterHint));
+        }
+    }
+
+    public bool ShowFilterHint => !_isFilterVisible;
+
     public string HeaderCount
     {
         get => _headerCount;
         private set
         {
+            if (string.Equals(_headerCount, value, StringComparison.Ordinal))
+                return;
+
             _headerCount = value;
             OnPropertyChanged();
         }
     }
 
+    /// <summary>Distinguishes "history is empty" from "the filter matched nothing".</summary>
+    public string EmptyMessage => HasSearchText ? "No matches" : "No clips";
+
     public void Refresh(int limit, bool isPaused)
     {
+        _limit = limit;
         IsPaused = isPaused;
-        var source = _history.Items.Take(limit).ToList();
-        HeaderCount = source.Count.ToString();
+        Rebuild();
+    }
+
+    private void Rebuild()
+    {
+        var all = _history.Items.Take(_limit).ToList();
+        var terms = ClipboardSearch.ParseTerms(_searchText);
+        var source = terms.Length == 0
+            ? all
+            : all.Where(i => ClipboardSearch.Matches(i, terms)).ToList();
+
+        HeaderCount = terms.Length == 0
+            ? source.Count.ToString()
+            : $"{source.Count} / {all.Count}";
 
         // Incremental update by id order
         for (var i = 0; i < source.Count; i++)
@@ -239,12 +306,36 @@ public sealed class PopupViewModel : INotifyPropertyChanged
             vm.EnsureThumbnail(_history);
 
         OnPropertyChanged(nameof(HasItems));
+        OnPropertyChanged(nameof(EmptyMessage));
     }
 
     /// <summary>Always highlight the newest (top) history row.</summary>
     public void SelectMostRecent()
     {
         SelectedItem = Items.FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Drops the filter and hides the filter row so the next open starts clean.
+    /// </summary>
+    /// <remarks>
+    /// Resets the backing fields without rebuilding: this runs while the popup is being
+    /// hidden, and rebuilding there would re-read every thumbnail from disk for a list
+    /// nobody is looking at. <see cref="Refresh"/> always runs before the popup is shown
+    /// again, which is what repopulates the list.
+    /// </remarks>
+    public void ResetSearch()
+    {
+        if (_searchText.Length == 0 && !_isFilterVisible)
+            return;
+
+        _searchText = string.Empty;
+        _isFilterVisible = false;
+        OnPropertyChanged(nameof(SearchText));
+        OnPropertyChanged(nameof(HasSearchText));
+        OnPropertyChanged(nameof(IsFilterVisible));
+        OnPropertyChanged(nameof(ShowFilterHint));
+        OnPropertyChanged(nameof(EmptyMessage));
     }
 
     public void ClearThumbnails()
