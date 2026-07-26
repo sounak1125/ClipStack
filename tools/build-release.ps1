@@ -13,6 +13,15 @@ function Assert-Version([string]$v) {
     }
 }
 
+# $ErrorActionPreference does not make a native executable's non-zero exit code
+# terminating on every PowerShell version, so each step is checked explicitly.
+# Without this a failing test run would sail straight through to a published release.
+function Assert-ExitCode([string]$step) {
+    if ($LASTEXITCODE -ne 0) {
+        throw "$step failed with exit code $LASTEXITCODE."
+    }
+}
+
 Assert-Version $Version
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -22,12 +31,15 @@ Write-Host "==> ClipStack release build $Version" -ForegroundColor Cyan
 
 Write-Host "==> Restoring local tools (vpk)"
 dotnet tool restore
+Assert-ExitCode "Tool restore"
 
 Write-Host "==> Restoring packages"
 dotnet restore .\ClipStack.sln
+Assert-ExitCode "Package restore"
 
 Write-Host "==> Running tests"
 dotnet test .\ClipStack.sln -c Release --nologo
+Assert-ExitCode "Tests"
 
 $publishDir = Join-Path $root "artifacts\publish\win-x64"
 $packDir = Join-Path $root "artifacts\releases"
@@ -48,6 +60,7 @@ dotnet publish .\src\ClipStack.App\ClipStack.App.csproj `
     -p:FileVersion=$Version.0 `
     -p:InformationalVersion=$Version `
     -o $publishDir
+Assert-ExitCode "Publish"
 
 Write-Host "==> Packaging with Velopack (vpk)"
 dotnet tool run vpk pack `
@@ -60,10 +73,7 @@ dotnet tool run vpk pack `
     --mainExe ClipStack.exe `
     --icon $packageIcon `
     --outputDir $packDir
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Velopack packaging failed with exit code $LASTEXITCODE."
-}
+Assert-ExitCode "Velopack packaging"
 
 Write-Host ""
 Write-Host "Release complete." -ForegroundColor Green
