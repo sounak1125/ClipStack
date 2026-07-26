@@ -120,7 +120,7 @@ internal sealed class AppController : IDisposable
         _tray.PauseChanged += _ => Application.Current.Dispatcher.Invoke(OnSettingsChanged);
         _tray.StartupChanged += _ => { };
 
-        _popup.PasteRequested += () => _ = PasteSelectedAsync();
+        _popup.PasteRequested += shiftHeld => _ = PasteSelectedAsync(shiftHeld);
         _popup.DeleteRequested += DeleteSelected;
         _popup.SettingsRequested += () => ShowSettings();
         _popup.ClearRequested += ClearHistory;
@@ -205,7 +205,7 @@ internal sealed class AppController : IDisposable
         _popupVm.ClearThumbnails();
     }
 
-    private async Task PasteSelectedAsync()
+    private async Task PasteSelectedAsync(bool shiftHeld = false)
     {
         var selected = _popupVm.SelectedItem;
         if (selected is null) return;
@@ -214,6 +214,10 @@ internal sealed class AppController : IDisposable
         var item = selected.Item;
         var settings = _settings.Current;
 
+        // Shift inverts the configured behaviour, so whichever mode is the default the
+        // other one is always a single modifier away.
+        var plainTextOnly = settings.PasteAsPlainText ^ shiftHeld;
+
         // Hide first so Windows can return activation to the captured target
         // (plain SetForegroundWindow often fails after a mouse click on our popup).
         _popup.BeginSuppressDeactivate();
@@ -221,7 +225,7 @@ internal sealed class AppController : IDisposable
         {
             HidePopup();
 
-            var result = await _restore.RestoreAsync(item).ConfigureAwait(true);
+            var result = await _restore.RestoreAsync(item, plainTextOnly).ConfigureAwait(true);
             if (!result.Success)
             {
                 _tray.ShowBalloon(result.Message ?? "Restore failed.");
@@ -230,7 +234,7 @@ internal sealed class AppController : IDisposable
 
             if (!settings.AutoPaste)
             {
-                _tray.ShowBalloon("Copied to clipboard.");
+                _tray.ShowBalloon(plainTextOnly ? "Copied as plain text." : "Copied to clipboard.");
                 return;
             }
 

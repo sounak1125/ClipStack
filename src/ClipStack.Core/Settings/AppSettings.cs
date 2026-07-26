@@ -11,6 +11,12 @@ public sealed class AppSettings
 
     public bool AutoPaste { get; set; } = true;
 
+    /// <summary>
+    /// When true, pasting strips HTML/RTF and offers only text. Shift+Enter inverts
+    /// whichever way this is set, so the other behaviour is always one key away.
+    /// </summary>
+    public bool PasteAsPlainText { get; set; }
+
     public bool ShowTrayNotifications { get; set; } = true;
 
     public int HistoryLimit { get; set; } = DefaultHistoryLimit;
@@ -62,6 +68,7 @@ public sealed class AppSettings
     {
         StartWithWindows = StartWithWindows,
         AutoPaste = AutoPaste,
+        PasteAsPlainText = PasteAsPlainText,
         ShowTrayNotifications = ShowTrayNotifications,
         HistoryLimit = HistoryLimit,
         MaxItemSizeBytes = MaxItemSizeBytes,

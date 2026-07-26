@@ -490,6 +490,12 @@
               <TextBlock Text="Auto-paste" Style="{StaticResource SettingTitle}" />
             </CheckBox>
 
+            <CheckBox x:Name="PasteAsPlainText"
+                      Style="{StaticResource ToggleSetting}"
+                      AutomationProperties.Name="Paste as plain text">
+              <TextBlock Text="Paste as plain text (Shift inverts)" Style="{StaticResource SettingTitle}" />
+            </CheckBox>
+
             <CheckBox x:Name="ShowNotifications"
                       Style="{StaticResource ToggleSetting}"
                       AutomationProperties.Name="Notifications">

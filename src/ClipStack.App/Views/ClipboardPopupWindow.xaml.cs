@@ -9,7 +9,8 @@ public partial class ClipboardPopupWindow : Window
     private bool _suppressDeactivateHide;
     private bool _openingSettings;
 
-    public event Action? PasteRequested;
+    /// <summary>Raised with true when Shift was held, meaning "invert the plain-text setting".</summary>
+    public event Action<bool>? PasteRequested;
     public event Action? DeleteRequested;
     public event Action? SettingsRequested;
     public event Action? ClearRequested;
@@ -64,6 +65,9 @@ public partial class ClipboardPopupWindow : Window
     }
 
     private bool IsFilterFocused => FilterBox.IsKeyboardFocusWithin;
+
+    /// <summary>Shift inverts the configured plain-text paste behaviour.</summary>
+    private static bool IsShiftHeld => (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
 
     private void ActivateFilter(PopupViewModel vm)
     {
@@ -142,7 +146,7 @@ public partial class ClipboardPopupWindow : Window
                     e.Handled = true;
                     break;
                 case Key.Enter:
-                    PasteRequested?.Invoke();
+                    PasteRequested?.Invoke(IsShiftHeld);
                     e.Handled = true;
                     break;
                 case Key.Up:
@@ -175,7 +179,7 @@ public partial class ClipboardPopupWindow : Window
                 e.Handled = true;
                 break;
             case Key.Enter:
-                PasteRequested?.Invoke();
+                PasteRequested?.Invoke(IsShiftHeld);
                 e.Handled = true;
                 break;
             case Key.Delete:
@@ -240,7 +244,7 @@ public partial class ClipboardPopupWindow : Window
         var item = vm.Items.FirstOrDefault(i => i.ShortcutNumber == number);
         if (item is null) return;
         vm.SelectedItem = item;
-        PasteRequested?.Invoke();
+        PasteRequested?.Invoke(IsShiftHeld);
     }
 
     private void OnItemClick(object sender, MouseButtonEventArgs e)
@@ -258,7 +262,7 @@ public partial class ClipboardPopupWindow : Window
         if (vm is null) return;
 
         vm.SelectedItem = clicked;
-        PasteRequested?.Invoke();
+        PasteRequested?.Invoke(IsShiftHeld);
         e.Handled = true;
     }
 

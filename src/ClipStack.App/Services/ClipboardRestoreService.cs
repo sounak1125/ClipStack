@@ -23,11 +23,14 @@ internal sealed class ClipboardRestoreService
         _logger = logger;
     }
 
-    public async Task<RestoreResult> RestoreAsync(ClipboardItem item, CancellationToken cancellationToken = default)
+    public async Task<RestoreResult> RestoreAsync(
+        ClipboardItem item,
+        bool plainTextOnly = false,
+        CancellationToken cancellationToken = default)
     {
         try
         {
-            var data = BuildDataObject(item, out var missingAllFiles);
+            var data = BuildDataObject(item, plainTextOnly, out var missingAllFiles);
             if (missingAllFiles)
                 return RestoreResult.Fail("Files are no longer available.");
 
@@ -64,11 +67,28 @@ internal sealed class ClipboardRestoreService
         }
     }
 
-    private DataObject? BuildDataObject(ClipboardItem item, out bool missingAllFiles)
+    private DataObject? BuildDataObject(ClipboardItem item, bool plainTextOnly, out bool missingAllFiles)
     {
         missingAllFiles = false;
         var data = new DataObject();
         var hasAny = false;
+
+        // Plain-text paste: for a clip that carries text, offer only the text formats so
+        // the target application cannot pick up the source's HTML or RTF styling. Clips
+        // with no text at all (images, file drops) still restore normally — there is no
+        // useful "plain" form of those, and silently pasting nothing would be worse.
+        if (plainTextOnly)
+        {
+            var plain = _history.ReadPayloadText(item, ClipboardFormatKind.UnicodeText)
+                        ?? _history.ReadPayloadText(item, ClipboardFormatKind.Text);
+
+            if (!string.IsNullOrEmpty(plain))
+            {
+                data.SetText(plain, TextDataFormat.UnicodeText);
+                try { data.SetText(plain, TextDataFormat.Text); } catch { /* ignore */ }
+                return data;
+            }
+        }
 
         var hasImagePayload = item.Payloads.Any(p =>
             p.Format is ClipboardFormatKind.ImagePng or ClipboardFormatKind.ImageOriginal);
