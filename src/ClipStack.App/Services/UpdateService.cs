@@ -217,18 +217,32 @@ public sealed class UpdateService
         }
     }
 
-    public void ApplyUpdateAndRestart()
+    /// <summary>
+    /// Applies the downloaded update and restarts. Returns only if that did not happen.
+    /// </summary>
+    /// <remarks>
+    /// On success this never returns: Velopack spawns Update.exe with <c>--waitPid</c> for
+    /// this process and then calls <c>Environment.Exit(0)</c>. Callers must therefore do
+    /// any cleanup <i>before</i> calling, and must be able to undo it when this returns
+    /// false — at that point the app is still very much alive.
+    /// </remarks>
+    public bool ApplyUpdateAndRestart()
     {
         try
         {
             if (_manager is null || _pending is null)
-                return;
+                return false;
+
             _manager.ApplyUpdatesAndRestart(_pending);
+
+            // Not reached in practice; the call above ends the process.
+            return true;
         }
         catch (Exception ex)
         {
             _logger.Error("ApplyUpdate", ex);
             Status = "Apply failed";
+            return false;
         }
     }
 

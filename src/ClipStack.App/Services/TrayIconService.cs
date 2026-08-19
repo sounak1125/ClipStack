@@ -157,6 +157,28 @@ internal sealed class TrayIconService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Shows or removes the tray icon without tearing the service down.
+    /// </summary>
+    /// <remarks>
+    /// Used before an update restart, which ends in <c>Environment.Exit</c> and so never
+    /// reaches <see cref="Dispose"/>. Explorer only reaps a dead process's icon lazily,
+    /// leaving a stale ClipStack icon beside the restarted one until something forces the
+    /// tray to refresh. Hiding rather than disposing keeps it reversible: if the restart
+    /// does not happen, the still-running app needs its icon back.
+    /// </remarks>
+    public void SetVisible(bool visible)
+    {
+        try
+        {
+            _notifyIcon.Visible = visible;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("TrayVisibility", ex);
+        }
+    }
+
     public void ShowBalloon(string message, string? title = null)
     {
         try

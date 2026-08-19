@@ -330,7 +330,24 @@ internal sealed class AppController : IDisposable
         _updateNotification.RestartRequested += () =>
         {
             _updateNotification?.Close();
-            _updates.ApplyUpdateAndRestart();
+
+            // Velopack ends this in Environment.Exit, which does not raise
+            // Application.OnExit — so Shutdown() never runs and the tray icon is never
+            // removed. Explorer reaps a dead process's icon only lazily, so the old one
+            // lingers beside the restarted app's. Take it down first.
+            //
+            // Deliberately not Shutdown(): that honours ClearHistoryOnExit, and an update
+            // is not the user choosing to exit. Reusing it here would wipe the history of
+            // everyone with that setting on — a far worse bug than a stale icon.
+            _tray.SetVisible(false);
+
+            if (!_updates.ApplyUpdateAndRestart())
+            {
+                // The restart did not happen, so the app is still running and still needs
+                // the icon that is now its only remaining entry point.
+                _tray.SetVisible(true);
+                _tray.ShowBalloon("Could not apply the update.");
+            }
         };
         _updateNotification.DismissRequested += () => _updateNotification?.Close();
         _updateNotification.Closed += (_, _) => _updateNotification = null;
