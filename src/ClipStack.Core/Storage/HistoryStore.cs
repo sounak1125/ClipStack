@@ -57,126 +57,192 @@ public sealed class HistoryStore
             return _index.Items.FirstOrDefault(i => i.Id == id);
     }
 
+    /// <summary>
+    /// Stores a new clip, or promotes the stored clip that already holds this content.
+    /// </summary>
+    /// <remarks>
+    /// Payload encryption and disk writes deliberately run <b>outside</b> <c>_gate</c>.
+    /// DPAPI costs roughly 50 ms per megabyte, so holding the lock across a large image
+    /// blocked every reader for the duration — and the popup's first act on the hotkey is
+    /// to read <see cref="Items"/>, which made a 50 MB capture freeze it for seconds.
+    /// Raising <see cref="EncryptionFailed"/> under the lock was worse still: the handler
+    /// marshals to the UI thread, which could already be waiting on the very same lock.
+    ///
+    /// The lock now covers only the in-memory index mutation and its save. That leaves a
+    /// window where a concurrent capture of the same content can win the race, so the
+    /// duplicate check runs again inside the lock and the losing write is discarded.
+    /// </remarks>
     public (ClipboardItem Item, bool WasDuplicate) AddOrPromote(NewClipboardItemData data, int historyLimit)
     {
         if (historyLimit < 1) historyLimit = 1;
 
+        // Fast path: this content is already stored, so nothing needs writing at all.
+        ClipboardItem? existing;
+        List<ClipboardItem> evicted;
+        lock (_gate)
+            existing = Promote_NoLock(data.ContentHash, historyLimit, out evicted);
+
+        DeleteItemFolders(evicted);
+        if (existing is not null)
+            return (existing, true);
+
+        var id = Guid.NewGuid();
+        var tempDir = _paths.GetTempItemDirectory(id);
+        var finalDir = _paths.GetItemDirectory(id);
+
+        List<ClipboardPayload> payloads;
+        long totalSize;
+        try
+        {
+            (payloads, totalSize) = WritePayloads(tempDir, finalDir, data);
+        }
+        catch
+        {
+            TryDeleteDirectory(tempDir);
+            TryDeleteDirectory(finalDir);
+            throw;
+        }
+
+        var thumbnail = payloads.FirstOrDefault(p => p.Format == ClipboardFormatKind.ThumbnailPng);
+        var now = DateTimeOffset.UtcNow;
+
+        var item = new ClipboardItem
+        {
+            Id = id,
+            CapturedUtc = now,
+            LastUsedUtc = now,
+            DominantKind = data.DominantKind,
+            ContentHash = data.ContentHash,
+            TotalSizeBytes = totalSize,
+            PreviewText = data.PreviewText,
+            CharacterCount = data.CharacterCount,
+            ImageWidth = data.ImageWidth,
+            ImageHeight = data.ImageHeight,
+            FileCount = data.FilePaths.Count,
+            Payloads = payloads,
+            FilePaths = data.FilePaths.ToList(),
+            ThumbnailRelativePath = thumbnail?.RelativePath,
+        };
+
+        ClipboardItem? raced;
         lock (_gate)
         {
-            var existing = _index.Items.FirstOrDefault(i =>
-                string.Equals(i.ContentHash, data.ContentHash, StringComparison.OrdinalIgnoreCase));
-
-            if (existing is not null)
+            // Another capture may have stored the same content while this one was writing.
+            raced = Promote_NoLock(data.ContentHash, historyLimit, out evicted);
+            if (raced is null)
             {
-                existing.LastUsedUtc = DateTimeOffset.UtcNow;
-                _index.Items.Remove(existing);
-                _index.Items.Insert(0, existing);
-                SortPinnedFirst_NoLock();
-                var promotedEvicted = EvictOverflow_NoLock(historyLimit);
-                SaveIndexAtomic_NoLock();
-                foreach (var e in promotedEvicted)
-                    TryDeleteItemFolder(e.Id);
-                return (existing, true);
-            }
-
-            var id = Guid.NewGuid();
-            var tempDir = _paths.GetTempItemDirectory(id);
-            var finalDir = _paths.GetItemDirectory(id);
-
-            try
-            {
-                if (Directory.Exists(tempDir))
-                    Directory.Delete(tempDir, recursive: true);
-                Directory.CreateDirectory(tempDir);
-
-                var payloads = new List<ClipboardPayload>();
-                long totalSize = 0;
-
-                foreach (var request in data.Payloads)
-                {
-                    var fileName = request.RelativeFileName ?? PayloadFileNames.ForFormat(request.Format);
-                    if (fileName.Contains("..", StringComparison.Ordinal) || Path.IsPathRooted(fileName))
-                        throw new InvalidOperationException("Unsafe payload file name.");
-
-                    var fullPath = Path.Combine(tempDir, fileName);
-
-                    // Encrypt at rest. This runs on the capture background thread, so the
-                    // DPAPI cost on a large image cannot reach the UI thread.
-                    var encrypted = false;
-                    var toWrite = request.Bytes;
-                    if (EncryptPayloads)
-                    {
-                        try
-                        {
-                            toWrite = PayloadProtector.Protect(request.Bytes);
-                            encrypted = toWrite.Length != request.Bytes.Length
-                                        || PayloadProtector.IsProtected(toWrite);
-                        }
-                        catch (Exception ex)
-                        {
-                            // Storing the clip in the clear beats losing it, but the user
-                            // must not be told it is encrypted when it is not.
-                            EncryptionFailed?.Invoke(ex);
-                            toWrite = request.Bytes;
-                            encrypted = false;
-                        }
-                    }
-
-                    File.WriteAllBytes(fullPath, toWrite);
-
-                    // SizeBytes tracks what is on disk, which is what disk-usage reports.
-                    totalSize += toWrite.LongLength;
-
-                    payloads.Add(new ClipboardPayload
-                    {
-                        Format = request.Format,
-                        RelativePath = fileName,
-                        SizeBytes = toWrite.LongLength,
-                        Encrypted = encrypted,
-                    });
-                }
-
-                if (Directory.Exists(finalDir))
-                    Directory.Delete(finalDir, recursive: true);
-                Directory.Move(tempDir, finalDir);
-
-                var thumbnail = payloads.FirstOrDefault(p => p.Format == ClipboardFormatKind.ThumbnailPng);
-
-                var item = new ClipboardItem
-                {
-                    Id = id,
-                    CapturedUtc = DateTimeOffset.UtcNow,
-                    LastUsedUtc = DateTimeOffset.UtcNow,
-                    DominantKind = data.DominantKind,
-                    ContentHash = data.ContentHash,
-                    TotalSizeBytes = totalSize,
-                    PreviewText = data.PreviewText,
-                    CharacterCount = data.CharacterCount,
-                    ImageWidth = data.ImageWidth,
-                    ImageHeight = data.ImageHeight,
-                    FileCount = data.FilePaths.Count,
-                    Payloads = payloads,
-                    FilePaths = data.FilePaths.ToList(),
-                    ThumbnailRelativePath = thumbnail?.RelativePath,
-                };
-
                 _index.Items.Insert(0, item);
                 SortPinnedFirst_NoLock();
-
-                var evicted = EvictOverflow_NoLock(historyLimit);
+                evicted = EvictOverflow_NoLock(historyLimit);
                 SaveIndexAtomic_NoLock();
-
-                foreach (var e in evicted)
-                    TryDeleteItemFolder(e.Id);
-
-                return (item, false);
-            }
-            catch
-            {
-                TryDeleteDirectory(tempDir);
-                throw;
             }
         }
+
+        DeleteItemFolders(evicted);
+
+        if (raced is not null)
+        {
+            // Our payloads lost the race and are referenced by nothing.
+            TryDeleteDirectory(finalDir);
+            return (raced, true);
+        }
+
+        return (item, false);
+    }
+
+    /// <summary>
+    /// Moves the clip holding this content to the front. Returns null when it is not stored.
+    /// Callers must hold <c>_gate</c> and delete <paramref name="evicted"/> after releasing it.
+    /// </summary>
+    private ClipboardItem? Promote_NoLock(string contentHash, int historyLimit, out List<ClipboardItem> evicted)
+    {
+        var existing = _index.Items.FirstOrDefault(i =>
+            string.Equals(i.ContentHash, contentHash, StringComparison.OrdinalIgnoreCase));
+
+        if (existing is null)
+        {
+            evicted = [];
+            return null;
+        }
+
+        existing.LastUsedUtc = DateTimeOffset.UtcNow;
+        _index.Items.Remove(existing);
+        _index.Items.Insert(0, existing);
+        SortPinnedFirst_NoLock();
+        evicted = EvictOverflow_NoLock(historyLimit);
+        SaveIndexAtomic_NoLock();
+        return existing;
+    }
+
+    /// <summary>
+    /// Encrypts and writes every payload into a temporary folder, then renames it into
+    /// place. Runs without <c>_gate</c> held — see <see cref="AddOrPromote"/>.
+    /// </summary>
+    private (List<ClipboardPayload> Payloads, long TotalSize) WritePayloads(
+        string tempDir,
+        string finalDir,
+        NewClipboardItemData data)
+    {
+        if (Directory.Exists(tempDir))
+            Directory.Delete(tempDir, recursive: true);
+        Directory.CreateDirectory(tempDir);
+
+        var payloads = new List<ClipboardPayload>();
+        long totalSize = 0;
+
+        foreach (var request in data.Payloads)
+        {
+            var fileName = request.RelativeFileName ?? PayloadFileNames.ForFormat(request.Format);
+            if (fileName.Contains("..", StringComparison.Ordinal) || Path.IsPathRooted(fileName))
+                throw new InvalidOperationException("Unsafe payload file name.");
+
+            var fullPath = Path.Combine(tempDir, fileName);
+
+            var encrypted = false;
+            var toWrite = request.Bytes;
+            if (EncryptPayloads)
+            {
+                try
+                {
+                    toWrite = PayloadProtector.Protect(request.Bytes);
+                    encrypted = toWrite.Length != request.Bytes.Length
+                                || PayloadProtector.IsProtected(toWrite);
+                }
+                catch (Exception ex)
+                {
+                    // Storing the clip in the clear beats losing it, but the user
+                    // must not be told it is encrypted when it is not.
+                    EncryptionFailed?.Invoke(ex);
+                    toWrite = request.Bytes;
+                    encrypted = false;
+                }
+            }
+
+            File.WriteAllBytes(fullPath, toWrite);
+
+            // SizeBytes tracks what is on disk, which is what disk-usage reports.
+            totalSize += toWrite.LongLength;
+
+            payloads.Add(new ClipboardPayload
+            {
+                Format = request.Format,
+                RelativePath = fileName,
+                SizeBytes = toWrite.LongLength,
+                Encrypted = encrypted,
+            });
+        }
+
+        if (Directory.Exists(finalDir))
+            Directory.Delete(finalDir, recursive: true);
+        Directory.Move(tempDir, finalDir);
+
+        return (payloads, totalSize);
+    }
+
+    private void DeleteItemFolders(IEnumerable<ClipboardItem> items)
+    {
+        foreach (var item in items)
+            TryDeleteItemFolder(item.Id);
     }
 
     /// <summary>
@@ -195,9 +261,7 @@ public sealed class HistoryStore
                 SaveIndexAtomic_NoLock();
         }
 
-        foreach (var e in evicted)
-            TryDeleteItemFolder(e.Id);
-
+        DeleteItemFolders(evicted);
         return evicted.Count;
     }
 
@@ -281,9 +345,11 @@ public sealed class HistoryStore
 
             _index.Items.Remove(item);
             SaveIndexAtomic_NoLock();
-            TryDeleteItemFolder(id);
-            return true;
         }
+
+        // Outside the lock: removing a large item folder is disk work no reader should wait on.
+        TryDeleteItemFolder(id);
+        return true;
     }
 
     public void ClearAll()

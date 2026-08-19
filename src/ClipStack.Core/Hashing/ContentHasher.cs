@@ -49,6 +49,18 @@ public static class ContentHasher
         return Convert.ToHexString(sha.Hash!).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// The hash a clipboard carrying nothing but this text produces on capture.
+    /// </summary>
+    /// <remarks>
+    /// A plain-text paste publishes only <see cref="ClipboardFormatKind.UnicodeText"/>, so
+    /// the clip that comes straight back hashes to this rather than to the stored clip's
+    /// hash — which for rich text also covers its HTML and RTF. Self-copy suppression has
+    /// to know both, or ClipStack records its own paste as a new clip.
+    /// </remarks>
+    public static string ComputeTextOnlyHash(string text) =>
+        ComputeHash([(ClipboardFormatKind.UnicodeText, (ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes(text))]);
+
     public static IReadOnlyList<string> NormalizeFilePaths(IEnumerable<string> paths)
     {
         return paths
