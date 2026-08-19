@@ -128,8 +128,8 @@ exceed it by however many clips you have pinned. Pinning every slot cannot stop 
 — new clips still arrive and push each other out. Unpinning returns a clip to its normal
 position by recency.
 
-Pin state lives in `index.json`. A history rebuilt from folders after a corrupt index
-loses it, along with the timestamps and hashes that recovery already cannot restore.
+Pin state lives in `index.json` and is mirrored into each clip's `meta.json`, so it
+survives a history rebuilt from folders. See [Recovery](#recovery).
 
 ### Filtering
 
@@ -175,8 +175,35 @@ Double-click the tray icon to show history.
   settings.json
   release-config.json
   logs\
-  items\<guid>\...
+  items\<guid>\
+    meta.json        (recovery sidecar; encrypted with the payloads)
+    ...              (payload files)
 ```
+
+### Recovery
+
+`index.json` is the authority while it is readable. Two things can go wrong with it, and
+they are handled differently:
+
+- **One bad entry.** An entry with an unsafe payload path is dropped on load and
+  everything else is kept. Treating a single bad row as whole-file corruption used to
+  discard every pin, hash and timestamp in the file to remove one clip.
+- **An unreadable file.** Only a file that cannot be parsed is backed up as
+  `index.corrupt.<timestamp>.json` and the history rebuilt from the item folders.
+
+Each item folder carries a `meta.json` holding what its payload files cannot express:
+the content hash, capture time, kind, preview, image dimensions and pin state. A rebuild
+reads it, so recovered clips keep their pins and still **deduplicate** — without it a
+recovered clip got a placeholder hash that no future capture could match, and re-copying
+the same text added a new row every time.
+
+`meta.json` carries preview text, so it is encrypted exactly like a payload. Clips
+captured before this existed get one written on the next launch. A folder that still has
+none recovers from its payload files alone, with a placeholder hash.
+
+`LastUsedUtc` is deliberately not stored there — it changes on every paste, and recovery
+ordering by capture time is worth more than a write per paste. A rebuilt history is
+therefore ordered by when clips were captured, not when they were last used.
 
 Clear local data:
 
@@ -343,6 +370,15 @@ the system tray, shortcuts, portable builds, and installer packages.
 - Copy past the history limit; confirm the pinned clip survives
 - Unpin; confirm it returns to its position by recency
 - Restart; confirm pins persist
+- Pin a clip past the history limit; confirm the newest unpinned clip is still listed
+
+### Recovery
+- Pin a clip, then replace `index.json` with garbage and restart
+- Confirm the history comes back with pins, previews and capture times intact
+- Re-copy one of the recovered clips; confirm it promotes instead of adding a second row
+- Confirm `index.corrupt.<timestamp>.json` was written
+- Hand-edit one entry's payload path in a valid `index.json` to `..\evil.txt` and restart;
+  confirm only that clip disappears and no `index.corrupt.*` file is written
 
 ### Encryption
 - With **Encrypt history on disk** on, copy text, then open `items\<guid>\text.txt`

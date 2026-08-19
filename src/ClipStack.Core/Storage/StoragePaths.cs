@@ -46,6 +46,12 @@ public static class PayloadFileNames
     public const string Thumbnail = "thumbnail.png";
     public const string Files = "files.json";
 
+    /// <summary>
+    /// Sidecar holding what the payload files cannot express. Reserved: no payload may
+    /// claim this name, or a capture would overwrite its own recovery record.
+    /// </summary>
+    public const string Metadata = "meta.json";
+
     public static string ForFormat(ClipboardFormatKind format) => format switch
     {
         ClipboardFormatKind.UnicodeText or ClipboardFormatKind.Text => Text,
