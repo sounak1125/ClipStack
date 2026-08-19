@@ -113,7 +113,7 @@ internal sealed class AppController : IDisposable
 
         _tray.ShowHistoryRequested += () => Application.Current.Dispatcher.Invoke(ShowPopup);
         _tray.SettingsRequested += () => Application.Current.Dispatcher.Invoke(() => ShowSettings());
-        _tray.ClearHistoryRequested += () => Application.Current.Dispatcher.Invoke(ClearHistory);
+        _tray.ClearHistoryRequested += () => Application.Current.Dispatcher.Invoke(() => ClearHistory("tray menu"));
         _tray.CheckUpdatesRequested += () => Application.Current.Dispatcher.InvokeAsync(async () =>
         {
             await _updates.CheckForUpdatesAsync(manual: true);
@@ -127,7 +127,7 @@ internal sealed class AppController : IDisposable
         _popup.DeleteRequested += DeleteSelected;
         _popup.TogglePinRequested += TogglePinSelected;
         _popup.SettingsRequested += () => ShowSettings();
-        _popup.ClearRequested += ClearHistory;
+        _popup.ClearRequested += () => ClearHistory("popup");
         _popup.CloseRequested += HidePopup;
 
         _updates.UpdateReady += version =>
@@ -311,11 +311,61 @@ internal sealed class AppController : IDisposable
         _popup.ScrollSelectionIntoView();
     }
 
-    private void ClearHistory()
+    /// <summary>
+    /// Clears the history at the user's request, recording where the request came from.
+    /// </summary>
+    /// <remarks>
+    /// History vanishing is indistinguishable from history being eaten by a storage bug
+    /// once it has happened: the clips are gone either way and nothing on disk says why.
+    /// Logging the trigger and the count turns "where did my clips go" from an
+    /// investigation into a lookup. Only the number is recorded — never clip content.
+    /// </remarks>
+    private void ClearHistory(string source)
     {
-        _history.ClearAll();
+        // Confirmed here rather than at each call site, so a new entry point cannot be
+        // added without the guard. The tray item and the popup button previously wiped
+        // everything on a single click, with a balloon afterwards as the only notice —
+        // and a cleared history is not recoverable.
+        if (!ConfirmClear())
+        {
+            _logger.Info("HistoryClearCancelled", $"Clear requested from {source}, cancelled by user.");
+            return;
+        }
+
+        var cleared = _history.ClearAll();
+        _logger.Info("HistoryCleared", $"{cleared} clip(s) cleared by user from {source}.");
         RefreshPopup();
         _tray.ShowBalloon("History cleared.");
+    }
+
+    private bool ConfirmClear()
+    {
+        // A modal dialog deactivates the popup, and the popup hides itself on deactivate —
+        // which would yank the list out from under the question being asked about it.
+        _popup.BeginSuppressDeactivate();
+        try
+        {
+            return ConfirmDialog.Confirm(
+                ResolveDialogOwner(),
+                "Clear history?",
+                "Every clip is removed, pinned ones included. This cannot be undone.",
+                confirmText: "Clear",
+                danger: true);
+        }
+        finally
+        {
+            _popup.EndSuppressDeactivate();
+        }
+    }
+
+    /// <summary>The window a modal dialog should sit over, or null when none is showing.</summary>
+    private Window? ResolveDialogOwner()
+    {
+        if (_settingsWindow is { IsVisible: true })
+            return _settingsWindow;
+        if (_popup.IsVisible)
+            return _popup;
+        return null;
     }
 
     private void ShowUpdateNotification(string version)
@@ -373,7 +423,7 @@ internal sealed class AppController : IDisposable
             _updates,
             TryChangeHotKey,
             OnSettingsChanged,
-            ClearHistory,
+            () => ClearHistory("settings"),
             ApplyTheme);
 
         _settingsWindow.Closed += (_, _) =>
@@ -422,7 +472,11 @@ internal sealed class AppController : IDisposable
         try
         {
             if (_settings.Current.ClearHistoryOnExit)
-                _history.ClearAll();
+            {
+                // The one path that empties history without anyone clicking anything.
+                var cleared = _history.ClearAll();
+                _logger.Info("HistoryCleared", $"{cleared} clip(s) cleared on exit (Clear history on exit is enabled).");
+            }
         }
         catch (Exception ex)
         {

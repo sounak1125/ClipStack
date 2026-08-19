@@ -363,8 +363,9 @@ public partial class SettingsWindow : Window
 
     private void OnClearHistory(object sender, RoutedEventArgs e)
     {
-        if (ConfirmDialog.Confirm(this, "Clear history?", confirmText: "Clear", danger: true))
-            _onClearHistory();
+        // The confirmation moved to AppController.ClearHistory so every entry point gets
+        // one. Asking again here would just make this path prompt twice.
+        _onClearHistory();
         DiskUsageText.Text = FormatBytes(_historyStore.CalculateDiskUsageBytes());
     }
 

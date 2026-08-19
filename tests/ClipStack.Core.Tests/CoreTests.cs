@@ -236,9 +236,21 @@ public class HistoryStoreTests
     {
         _store.AddOrPromote(MakeTextItem("a"), 10);
         _store.AddOrPromote(MakeTextItem("b"), 10);
-        _store.ClearAll();
+        var cleared = _store.ClearAll();
+        Assert.AreEqual(2, cleared, "The count is what gets logged, so it has to be right.");
         Assert.AreEqual(0, _store.Items.Count);
         Assert.AreEqual(0, Directory.GetDirectories(Path.Combine(_root, "items")).Length);
+    }
+
+    /// <summary>
+    /// Clearing an empty history must report zero rather than throw or miscount — the
+    /// log line is the only record that a clear happened at all.
+    /// </summary>
+    [TestMethod]
+    public void ClearAll_OnEmptyHistory_ReportsZero()
+    {
+        Assert.AreEqual(0, _store.ClearAll());
+        Assert.AreEqual(0, _store.Items.Count);
     }
 
     [TestMethod]

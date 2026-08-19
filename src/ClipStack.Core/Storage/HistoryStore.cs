@@ -485,7 +485,12 @@ public sealed class HistoryStore
         return true;
     }
 
-    public void ClearAll()
+    /// <summary>Removes every clip. Returns how many were removed, so the caller can log it.</summary>
+    /// <remarks>
+    /// The count is taken under the lock rather than read from <see cref="Items"/> first,
+    /// which would miss a capture landing in between and report the wrong number.
+    /// </remarks>
+    public int ClearAll()
     {
         List<Guid> ids;
         lock (_gate)
@@ -499,6 +504,7 @@ public sealed class HistoryStore
             TryDeleteItemFolder(id);
 
         CleanupTemporaryFolders();
+        return ids.Count;
     }
 
     public void Touch(Guid id)
