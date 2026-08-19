@@ -7,6 +7,13 @@ namespace ClipStack.Core.Storage;
 
 public sealed class HistoryStore
 {
+    /// <summary>
+    /// Marks a clip rebuilt from a folder that predates the metadata sidecar. Deliberately
+    /// not a valid SHA-256, so it can never collide with a real content hash — but also
+    /// never match one, which is why it is now a fallback rather than the rule.
+    /// </summary>
+    public const string RecoveredHashPrefix = "recovered-";
+
     private readonly StoragePaths _paths;
     private readonly object _gate = new();
     private ClipboardIndex _index = new();
@@ -42,7 +49,47 @@ public sealed class HistoryStore
         CleanupTemporaryFolders();
         _index = LoadOrRecoverIndex();
         ValidateAndPruneMissingPayloads();
+        BackfillMissingMetadata();
         SaveIndexAtomic();
+    }
+
+    /// <summary>
+    /// Writes the recovery sidecar for clips captured before it existed.
+    /// </summary>
+    /// <remarks>
+    /// Without this the fix would only protect clips captured after the upgrade, leaving
+    /// an existing history one corrupt index away from the un-deduplicable state this
+    /// replaced. Runs once — after the backfill every folder has a sidecar — and writes
+    /// only small files.
+    /// </remarks>
+    private void BackfillMissingMetadata()
+    {
+        foreach (var item in Items)
+        {
+            try
+            {
+                var dir = _paths.GetItemDirectory(item.Id);
+                if (!Directory.Exists(dir) || File.Exists(Path.Combine(dir, PayloadFileNames.Metadata)))
+                    continue;
+
+                WriteMetadata(dir, new ClipboardItemMetadata
+                {
+                    ContentHash = item.ContentHash,
+                    DominantKind = item.DominantKind,
+                    CapturedUtc = item.CapturedUtc,
+                    PreviewText = item.PreviewText,
+                    CharacterCount = item.CharacterCount,
+                    ImageWidth = item.ImageWidth,
+                    ImageHeight = item.ImageHeight,
+                    FileCount = item.FileCount,
+                    IsPinned = item.IsPinned,
+                });
+            }
+            catch
+            {
+                // best effort; the index still has everything while it stays readable
+            }
+        }
     }
 
     public ClipboardItem? FindByHash(string contentHash)
@@ -90,11 +137,26 @@ public sealed class HistoryStore
         var tempDir = _paths.GetTempItemDirectory(id);
         var finalDir = _paths.GetItemDirectory(id);
 
+        var now = DateTimeOffset.UtcNow;
+
+        // Stored beside the payloads so a rebuild from folders does not have to guess.
+        var metadata = new ClipboardItemMetadata
+        {
+            ContentHash = data.ContentHash,
+            DominantKind = data.DominantKind,
+            CapturedUtc = now,
+            PreviewText = data.PreviewText,
+            CharacterCount = data.CharacterCount,
+            ImageWidth = data.ImageWidth,
+            ImageHeight = data.ImageHeight,
+            FileCount = data.FilePaths.Count,
+        };
+
         List<ClipboardPayload> payloads;
         long totalSize;
         try
         {
-            (payloads, totalSize) = WritePayloads(tempDir, finalDir, data);
+            (payloads, totalSize) = WritePayloads(tempDir, finalDir, data, metadata);
         }
         catch
         {
@@ -104,7 +166,6 @@ public sealed class HistoryStore
         }
 
         var thumbnail = payloads.FirstOrDefault(p => p.Format == ClipboardFormatKind.ThumbnailPng);
-        var now = DateTimeOffset.UtcNow;
 
         var item = new ClipboardItem
         {
@@ -181,7 +242,8 @@ public sealed class HistoryStore
     private (List<ClipboardPayload> Payloads, long TotalSize) WritePayloads(
         string tempDir,
         string finalDir,
-        NewClipboardItemData data)
+        NewClipboardItemData data,
+        ClipboardItemMetadata metadata)
     {
         if (Directory.Exists(tempDir))
             Directory.Delete(tempDir, recursive: true);
@@ -195,6 +257,8 @@ public sealed class HistoryStore
             var fileName = request.RelativeFileName ?? PayloadFileNames.ForFormat(request.Format);
             if (fileName.Contains("..", StringComparison.Ordinal) || Path.IsPathRooted(fileName))
                 throw new InvalidOperationException("Unsafe payload file name.");
+            if (fileName.Equals(PayloadFileNames.Metadata, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Payload may not claim the reserved metadata file name.");
 
             var fullPath = Path.Combine(tempDir, fileName);
 
@@ -232,11 +296,57 @@ public sealed class HistoryStore
             });
         }
 
+        // Into the temp folder too, so the sidecar lands atomically with what it describes.
+        WriteMetadata(tempDir, metadata);
+
         if (Directory.Exists(finalDir))
             Directory.Delete(finalDir, recursive: true);
         Directory.Move(tempDir, finalDir);
 
         return (payloads, totalSize);
+    }
+
+    /// <summary>
+    /// Writes the recovery sidecar. Encrypted like a payload — it carries preview text.
+    /// </summary>
+    private void WriteMetadata(string dir, ClipboardItemMetadata metadata)
+    {
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(metadata, AppIdentity.JsonOptions));
+
+        if (EncryptPayloads)
+        {
+            try
+            {
+                bytes = PayloadProtector.Protect(bytes);
+            }
+            catch (Exception ex)
+            {
+                // Same bargain as a payload: storing it readable beats losing it.
+                EncryptionFailed?.Invoke(ex);
+            }
+        }
+
+        File.WriteAllBytes(Path.Combine(dir, PayloadFileNames.Metadata), bytes);
+    }
+
+    private static ClipboardItemMetadata? TryReadMetadata(string dir)
+    {
+        var path = Path.Combine(dir, PayloadFileNames.Metadata);
+        if (!File.Exists(path))
+            return null;
+
+        try
+        {
+            if (TryReadPayloadFile(path) is not { Length: > 0 } bytes)
+                return null;
+
+            return JsonSerializer.Deserialize<ClipboardItemMetadata>(
+                Encoding.UTF8.GetString(bytes), AppIdentity.JsonOptions);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void DeleteItemFolders(IEnumerable<ClipboardItem> items)
@@ -322,6 +432,7 @@ public sealed class HistoryStore
     /// <summary>Toggles the pin flag. Returns the new state, or null when the id is unknown.</summary>
     public bool? TogglePin(Guid id)
     {
+        bool pinned;
         lock (_gate)
         {
             var item = _index.Items.FirstOrDefault(i => i.Id == id);
@@ -329,9 +440,31 @@ public sealed class HistoryStore
                 return null;
 
             item.IsPinned = !item.IsPinned;
+            pinned = item.IsPinned;
             SortPinnedFirst_NoLock();
             SaveIndexAtomic_NoLock();
-            return item.IsPinned;
+        }
+
+        // Outside the lock, and best effort: the index is the authority while it is
+        // readable, so a sidecar that falls behind costs nothing until recovery runs.
+        TryUpdateMetadataPin(id, pinned);
+        return pinned;
+    }
+
+    private void TryUpdateMetadataPin(Guid id, bool pinned)
+    {
+        try
+        {
+            var dir = _paths.GetItemDirectory(id);
+            if (TryReadMetadata(dir) is not { } metadata || metadata.IsPinned == pinned)
+                return;
+
+            metadata.IsPinned = pinned;
+            WriteMetadata(dir, metadata);
+        }
+        catch
+        {
+            // best effort
         }
     }
 
@@ -466,6 +599,17 @@ public sealed class HistoryStore
             TryDeleteDirectory(dir);
     }
 
+    /// <summary>
+    /// Loads the index, falling back to rebuilding from item folders.
+    /// </summary>
+    /// <remarks>
+    /// Only a file that cannot be read or parsed triggers the rebuild. A single unsafe
+    /// entry inside an otherwise valid index is that entry's problem and is dropped by
+    /// <see cref="ValidateAndPruneMissingPayloads"/>, which validates every item
+    /// individually on the very next line of <see cref="Initialize"/>. Treating one bad
+    /// path as whole-file corruption discarded every pin, hash and timestamp in the file
+    /// to remove a single row.
+    /// </remarks>
     private ClipboardIndex LoadOrRecoverIndex()
     {
         if (!File.Exists(_paths.IndexFile))
@@ -474,14 +618,8 @@ public sealed class HistoryStore
         try
         {
             var json = File.ReadAllText(_paths.IndexFile, Encoding.UTF8);
-            var index = JsonSerializer.Deserialize<ClipboardIndex>(json, AppIdentity.JsonOptions);
-            if (index is null)
-                throw new InvalidDataException("Index deserialized to null.");
-
-            foreach (var item in index.Items)
-                ValidateItemPaths(item);
-
-            return index;
+            return JsonSerializer.Deserialize<ClipboardIndex>(json, AppIdentity.JsonOptions)
+                   ?? throw new InvalidDataException("Index deserialized to null.");
         }
         catch
         {
@@ -682,14 +820,41 @@ public sealed class HistoryStore
 
         var thumb = payloads.FirstOrDefault(p => p.Format == ClipboardFormatKind.ThumbnailPng);
         var utc = Directory.GetCreationTimeUtc(dir);
+        var capturedUtc = new DateTimeOffset(utc, TimeSpan.Zero);
+
+        // Only reachable for folders written before the sidecar existed. A hash no capture
+        // can ever match means the clip never deduplicates again, so it is a last resort
+        // rather than the normal outcome.
+        var contentHash = RecoveredHashPrefix + id.ToString("N");
+        var pinned = false;
+
+        if (TryReadMetadata(dir) is { } metadata)
+        {
+            if (!string.IsNullOrWhiteSpace(metadata.ContentHash))
+                contentHash = metadata.ContentHash;
+            if (metadata.DominantKind != ClipboardItemKind.Unknown)
+                kind = metadata.DominantKind;
+            if (metadata.CapturedUtc > DateTimeOffset.MinValue)
+                capturedUtc = metadata.CapturedUtc;
+            if (!string.IsNullOrEmpty(metadata.PreviewText))
+                preview = metadata.PreviewText;
+            if (metadata.CharacterCount > 0)
+                charCount = metadata.CharacterCount;
+
+            // Dimensions have no folder-level fallback at all; without the sidecar a
+            // recovered image row shows "×" where its size should be.
+            w = metadata.ImageWidth ?? w;
+            h = metadata.ImageHeight ?? h;
+            pinned = metadata.IsPinned;
+        }
 
         return new ClipboardItem
         {
             Id = id,
-            CapturedUtc = new DateTimeOffset(utc, TimeSpan.Zero),
-            LastUsedUtc = new DateTimeOffset(utc, TimeSpan.Zero),
+            CapturedUtc = capturedUtc,
+            LastUsedUtc = capturedUtc,
             DominantKind = kind,
-            ContentHash = "recovered-" + id.ToString("N"),
+            ContentHash = contentHash,
             TotalSizeBytes = total,
             PreviewText = preview,
             CharacterCount = charCount,
@@ -699,6 +864,7 @@ public sealed class HistoryStore
             Payloads = payloads,
             FilePaths = files,
             ThumbnailRelativePath = thumb?.RelativePath,
+            IsPinned = pinned,
         };
     }
 
