@@ -127,7 +127,6 @@ internal sealed class AppController : IDisposable
         _popup.DeleteRequested += DeleteSelected;
         _popup.TogglePinRequested += TogglePinSelected;
         _popup.SettingsRequested += () => ShowSettings();
-        _popup.ClearRequested += () => ClearHistory("popup");
         _popup.CloseRequested += HidePopup;
 
         _updates.UpdateReady += version =>

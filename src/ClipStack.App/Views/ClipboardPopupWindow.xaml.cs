@@ -14,7 +14,6 @@ public partial class ClipboardPopupWindow : Window
     public event Action? DeleteRequested;
     public event Action? TogglePinRequested;
     public event Action? SettingsRequested;
-    public event Action? ClearRequested;
     public event Action? CloseRequested;
 
     public ClipboardPopupWindow()
@@ -292,8 +291,6 @@ public partial class ClipboardPopupWindow : Window
         try { SettingsRequested?.Invoke(); }
         finally { _openingSettings = false; }
     }
-
-    private void OnClearClick(object sender, RoutedEventArgs e) => ClearRequested?.Invoke();
 
     private void OnCloseClick(object sender, RoutedEventArgs e) => CloseRequested?.Invoke();
 }
