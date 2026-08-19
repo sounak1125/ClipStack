@@ -62,6 +62,13 @@ dotnet publish .\src\ClipStack.App\ClipStack.App.csproj `
     -o $publishDir
 Assert-ExitCode "Publish"
 
+# Branding stays deliberately minimal: no --splashImage, no banner, no logo, so the
+# installer shows the app icon and a progress bar and nothing else.
+#
+# --shortcuts StartMenuRoot overrides Velopack's Desktop,StartMenuRoot default. ClipStack
+# is a tray app that enables Start with Windows on install, so a desktop icon is clutter
+# the user did not ask for. The Start Menu entry stays: without it there is no way to
+# launch ClipStack again after exiting from the tray.
 Write-Host "==> Packaging with Velopack (vpk)"
 dotnet tool run vpk pack `
     --packId ClipStack.Desktop `
@@ -72,6 +79,7 @@ dotnet tool run vpk pack `
     --packDir $publishDir `
     --mainExe ClipStack.exe `
     --icon $packageIcon `
+    --shortcuts StartMenuRoot `
     --outputDir $packDir
 Assert-ExitCode "Velopack packaging"
 

@@ -253,6 +253,30 @@ This will:
 4. Package with `vpk pack`
 5. Write installer/update files under `artifacts\releases`
 
+Output:
+
+| File | Purpose |
+|------|---------|
+| `ClipStack.Desktop-win-Setup.exe` | The installer new users run |
+| `ClipStack.Desktop-win-Portable.zip` | Unpacked build, no installer, no updates |
+| `ClipStack.Desktop-<v>-full.nupkg` | Whole app; used for a first update or when no delta applies |
+| `ClipStack.Desktop-<v>-delta.nupkg` | Changed files only; what existing installs normally download |
+| `RELEASES`, `releases.win.json` | The update feed |
+
+### Installer branding
+
+Deliberately minimal. No `--splashImage`, banner, or logo is passed, so setup shows the
+app icon and a progress bar and nothing else.
+
+`--shortcuts StartMenuRoot` overrides Velopack's `Desktop,StartMenuRoot` default:
+ClipStack is a tray app that enables **Start with Windows** on install, so a desktop icon
+is clutter nobody asked for. The Start Menu entry stays — without it there is no way to
+launch ClipStack again after exiting from the tray.
+
+Setup is **not signed** unless you supply `--signParams` or `--signTemplate`. Unsigned
+installers trigger SmartScreen's "Windows protected your PC" on first run. See
+[Code signing](#code-signing).
+
 ### Automatic updates
 
 Public releases use the GitHub repository configured in `release-config.json`:
@@ -265,6 +289,10 @@ background while the app remains open. A newer version is
 downloaded silently, then a non-modal notification lets the user choose
 **Restart & update** or **Later**. Manual checks remain available from Settings
 and the tray menu.
+
+Updating does **not** re-run the installer. Velopack downloads the delta package —
+a few hundred KB against a ~75 MB full package — and applies it in place, then
+restarts. Setup.exe is only for a first install.
 
 ### Publish a new version
 
