@@ -45,6 +45,16 @@ public partial class ConfirmDialog : Window
             Title = title,
         };
 
+        if (owner is null)
+        {
+            // Raised from the tray, with no window to parent to. CenterOwner degenerates
+            // to the screen corner without an owner, and ShowInTaskbar is off, so an
+            // unowned dialog would be easy to miss entirely — and this one guards a
+            // destructive action.
+            dialog.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            dialog.Topmost = true;
+        }
+
         dialog.TitleText.Text = title;
         if (!string.IsNullOrWhiteSpace(message))
         {
