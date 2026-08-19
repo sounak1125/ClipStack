@@ -2,6 +2,7 @@ using System.Collections.Specialized;
 using System.IO;
 using System.Windows;
 using System.Windows.Media.Imaging;
+using ClipStack.Core.Hashing;
 using ClipStack.Core.Models;
 using ClipStack.Core.Storage;
 using ClipStack.Core.Utilities;
@@ -80,7 +81,7 @@ internal sealed class ClipboardRestoreService
                 try
                 {
                     Clipboard.SetDataObject(data, copy: true);
-                    _suppression.Arm(item.ContentHash, TimeSpan.FromSeconds(2));
+                    _suppression.Arm(SuppressionHashes(item, payloads), TimeSpan.FromSeconds(2));
                     _history.Touch(item.Id);
                     return RestoreResult.Ok();
                 }
@@ -105,6 +106,32 @@ internal sealed class ClipboardRestoreService
             _logger.Error("RestoreItem", ex);
             return RestoreResult.Fail("Restore failed.");
         }
+    }
+
+    /// <summary>
+    /// Every hash the clip we just published can be captured back as.
+    /// </summary>
+    /// <remarks>
+    /// A full restore puts back every stored format, so it re-hashes to the stored hash.
+    /// A plain-text restore publishes text alone and hashes to something else entirely,
+    /// so arming with the stored hash alone let the paste come straight back in as a new
+    /// clip — one duplicate plain-text row per Shift+Enter on a styled clip.
+    ///
+    /// Keyed off what was actually published rather than off the plain-text flag, so a
+    /// clip whose HTML or RTF payload has gone missing is covered by the same reasoning.
+    /// </remarks>
+    private static IReadOnlyCollection<string> SuppressionHashes(ClipboardItem item, RestorePayloads payloads)
+    {
+        var publishedTextOnly =
+            !string.IsNullOrEmpty(payloads.Text)
+            && string.IsNullOrEmpty(payloads.Html)
+            && string.IsNullOrEmpty(payloads.Rtf)
+            && payloads.Image is null
+            && payloads.ExistingFiles.Length == 0;
+
+        return publishedTextOnly
+            ? [item.ContentHash, ContentHasher.ComputeTextOnlyHash(payloads.Text!)]
+            : [item.ContentHash];
     }
 
     private RestorePayloads LoadPayloads(ClipboardItem item, bool plainTextOnly)

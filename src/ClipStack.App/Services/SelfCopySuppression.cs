@@ -5,17 +5,27 @@ namespace ClipStack.Services;
 internal sealed class SelfCopySuppression
 {
     private readonly object _gate = new();
-    private string? _hash;
+    private string[] _hashes = [];
     private DateTimeOffset _expiresUtc;
-    private int _remainingMatches = 2;
+    private int _remainingMatches;
 
-    public void Arm(string contentHash, TimeSpan duration)
+    /// <summary>
+    /// Arms suppression for every hash the clip just written to the clipboard can be
+    /// captured back as.
+    /// </summary>
+    /// <remarks>
+    /// More than one is needed because a plain-text paste publishes fewer formats than
+    /// were captured, so the clip coming back does not hash to the stored clip's hash.
+    /// Matching the stored hash alone let every Shift+Enter on a styled clip add a
+    /// duplicate plain-text row to the history.
+    /// </remarks>
+    public void Arm(IReadOnlyCollection<string> contentHashes, TimeSpan duration)
     {
         lock (_gate)
         {
-            _hash = contentHash;
+            _hashes = contentHashes.Where(h => !string.IsNullOrEmpty(h)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             _expiresUtc = DateTimeOffset.UtcNow + duration;
-            _remainingMatches = 2;
+            _remainingMatches = _hashes.Length == 0 ? 0 : 2;
         }
     }
 
@@ -23,7 +33,7 @@ internal sealed class SelfCopySuppression
     {
         lock (_gate)
         {
-            if (_hash is null)
+            if (_hashes.Length == 0)
                 return false;
 
             if (DateTimeOffset.UtcNow > _expiresUtc)
@@ -32,7 +42,7 @@ internal sealed class SelfCopySuppression
                 return false;
             }
 
-            if (!string.Equals(_hash, contentHash, StringComparison.OrdinalIgnoreCase))
+            if (!_hashes.Contains(contentHash, StringComparer.OrdinalIgnoreCase))
                 return false;
 
             _remainingMatches--;
@@ -49,7 +59,7 @@ internal sealed class SelfCopySuppression
 
     private void Clear_NoLock()
     {
-        _hash = null;
+        _hashes = [];
         _remainingMatches = 0;
     }
 }

@@ -1074,3 +1074,226 @@ public class ClipboardSearchTests
         Assert.IsTrue(ClipboardSearch.Matches(item, ""));
     }
 }
+
+[TestClass]
+public class ClipboardHistoryViewTests
+{
+    private static ClipboardItem Item(string preview, bool pinned) =>
+        new() { Id = Guid.NewGuid(), PreviewText = preview, IsPinned = pinned };
+
+    /// <summary>
+    /// The limit counts unpinned clips only, so a full limit's worth of pins must not
+    /// push every unpinned clip — including the one just copied — out of the popup.
+    /// </summary>
+    [TestMethod]
+    public void ApplyLimit_KeepsUnpinnedClips_WhenPinsFillTheLimit()
+    {
+        // The store's own order: pinned first, then by recency.
+        var stored = new List<ClipboardItem>
+        {
+            Item("pinned-5", true), Item("pinned-4", true), Item("pinned-3", true),
+            Item("pinned-2", true), Item("pinned-1", true),
+            Item("fresh-5", false), Item("fresh-4", false), Item("fresh-3", false),
+            Item("fresh-2", false), Item("fresh-1", false),
+        };
+
+        var visible = ClipboardHistoryView.ApplyLimit(stored, 5);
+
+        Assert.AreEqual(10, visible.Count);
+        Assert.IsTrue(visible.Any(i => i.PreviewText == "fresh-5"), "The most recent clip must stay visible.");
+        CollectionAssert.AreEqual(stored, visible, "Ordering must be left to the store.");
+    }
+
+    [TestMethod]
+    public void ApplyLimit_TrimsUnpinnedOverflow_KeepingTheNewest()
+    {
+        var stored = new List<ClipboardItem>
+        {
+            Item("pinned", true),
+            Item("newest", false), Item("middle", false), Item("oldest", false),
+        };
+
+        var visible = ClipboardHistoryView.ApplyLimit(stored, 2);
+
+        CollectionAssert.AreEqual(
+            new[] { "pinned", "newest", "middle" },
+            visible.Select(i => i.PreviewText).ToArray());
+    }
+
+    [TestMethod]
+    public void ApplyLimit_ClampsNonPositiveLimit()
+    {
+        var stored = new List<ClipboardItem> { Item("a", false), Item("b", false) };
+
+        Assert.AreEqual(1, ClipboardHistoryView.ApplyLimit(stored, 0).Count);
+        Assert.AreEqual(1, ClipboardHistoryView.ApplyLimit(stored, -3).Count);
+    }
+
+    [TestMethod]
+    public void ApplyLimit_MatchesWhatTheStoreKeeps()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "ClipStackTests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new HistoryStore(new StoragePaths(root)) { EncryptPayloads = false };
+            store.Initialize();
+
+            const int limit = 3;
+            for (var i = 1; i <= 3; i++)
+            {
+                var (item, _) = store.AddOrPromote(TextItem($"pinned-{i}"), limit);
+                store.TogglePin(item.Id);
+            }
+            for (var i = 1; i <= 3; i++)
+                store.AddOrPromote(TextItem($"fresh-{i}"), limit);
+
+            // Nothing the store chose to keep may be hidden from the popup.
+            var visible = ClipboardHistoryView.ApplyLimit(store.Items, limit);
+            CollectionAssert.AreEqual(store.Items.ToList(), visible);
+            Assert.IsTrue(visible.Any(i => i.PreviewText == "fresh-3"));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* ignore */ }
+        }
+    }
+
+    private static NewClipboardItemData TextItem(string text) => new()
+    {
+        DominantKind = ClipboardItemKind.Text,
+        ContentHash = ContentHasher.ComputeTextOnlyHash(text),
+        PreviewText = text,
+        CharacterCount = text.Length,
+        Payloads = [new PayloadWriteRequest { Format = ClipboardFormatKind.UnicodeText, Bytes = Encoding.UTF8.GetBytes(text) }],
+    };
+}
+
+[TestClass]
+public class SelfCopyHashTests
+{
+    /// <summary>
+    /// A plain-text paste republishes text alone, so the clip coming back hashes to
+    /// something the stored rich-text hash cannot match. Suppression has to arm both.
+    /// </summary>
+    [TestMethod]
+    public void TextOnlyHash_DiffersFromRichTextHash_ForTheSameText()
+    {
+        const string text = "Hello world";
+        var richHash = ContentHasher.ComputeHash(
+        [
+            (ClipboardFormatKind.UnicodeText, Encoding.UTF8.GetBytes(text)),
+            (ClipboardFormatKind.Html, Encoding.UTF8.GetBytes("<b>Hello world</b>")),
+            (ClipboardFormatKind.Rtf, Encoding.UTF8.GetBytes(@"{\rtf1 Hello world}")),
+        ]);
+
+        Assert.AreNotEqual(richHash, ContentHasher.ComputeTextOnlyHash(text));
+    }
+
+    /// <summary>
+    /// It must equal what the capture path produces for a text-only clipboard, or
+    /// suppressing on it would never fire.
+    /// </summary>
+    [TestMethod]
+    public void TextOnlyHash_MatchesCaptureOfATextOnlyClipboard()
+    {
+        const string text = "Hello world";
+        var captured = ContentHasher.ComputeHash(
+            [(ClipboardFormatKind.UnicodeText, Encoding.UTF8.GetBytes(text))]);
+
+        Assert.AreEqual(captured, ContentHasher.ComputeTextOnlyHash(text));
+    }
+}
+
+[TestClass]
+public class HistoryStoreConcurrencyTests
+{
+    /// <summary>
+    /// Big enough that DPAPI (~50 ms/MB) takes seconds, so a reader that waits on the
+    /// write is unmistakable against the sub-millisecond one that does not.
+    /// </summary>
+    private const int LargePayloadBytes = 64 * 1024 * 1024;
+
+    private const int ReaderBudgetMs = 1500;
+
+    /// <summary>
+    /// Reading the history must not wait on a capture's encryption and disk writes.
+    /// </summary>
+    /// <remarks>
+    /// The popup's first act on the hotkey is to read Items. When AddOrPromote held the
+    /// store lock across DPAPI and the payload write, a 50 MB clip froze the popup for
+    /// ~2.4 s despite all of that work already running off the UI thread.
+    /// </remarks>
+    [TestMethod]
+    public void Items_DoesNotBlock_WhileALargeCaptureIsBeingWritten()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "ClipStackTests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var paths = new StoragePaths(root);
+            var store = new HistoryStore(paths) { EncryptPayloads = true };
+            store.Initialize();
+            store.AddOrPromote(SmallItem("already stored"), 50);
+
+            var payload = new byte[LargePayloadBytes];
+            Random.Shared.NextBytes(payload);
+
+            var capture = Task.Run(() => store.AddOrPromote(LargeItem(payload), 50));
+
+            // The temp folder exists for exactly the encrypt-and-write window, so its
+            // presence proves the capture is mid-write rather than not yet started.
+            Assert.IsTrue(
+                WaitForWriteInProgress(paths, TimeSpan.FromSeconds(30)),
+                "Capture never reached the payload write; the test proved nothing.");
+
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var items = store.Items;
+            stopwatch.Stop();
+
+            Assert.IsTrue(
+                stopwatch.ElapsedMilliseconds < ReaderBudgetMs,
+                $"Items blocked for {stopwatch.ElapsedMilliseconds} ms behind an in-flight capture.");
+            Assert.AreEqual(1, items.Count, "The reader must see the history as it stood before the capture landed.");
+
+            capture.Wait(TimeSpan.FromMinutes(2));
+            Assert.AreEqual(2, store.Items.Count, "The capture must still land once it finishes.");
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* ignore */ }
+        }
+    }
+
+    private static bool WaitForWriteInProgress(StoragePaths paths, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                if (Directory.EnumerateDirectories(paths.Items, ".tmp-*").Any())
+                    return true;
+            }
+            catch { /* directory churn */ }
+
+            Thread.Sleep(10);
+        }
+
+        return false;
+    }
+
+    private static NewClipboardItemData SmallItem(string text) => new()
+    {
+        DominantKind = ClipboardItemKind.Text,
+        ContentHash = ContentHasher.ComputeTextOnlyHash(text),
+        PreviewText = text,
+        Payloads = [new PayloadWriteRequest { Format = ClipboardFormatKind.UnicodeText, Bytes = Encoding.UTF8.GetBytes(text) }],
+    };
+
+    private static NewClipboardItemData LargeItem(byte[] payload) => new()
+    {
+        DominantKind = ClipboardItemKind.Image,
+        ContentHash = "large-image",
+        PreviewText = "Image",
+        Payloads = [new PayloadWriteRequest { Format = ClipboardFormatKind.ImagePng, Bytes = payload }],
+    };
+}

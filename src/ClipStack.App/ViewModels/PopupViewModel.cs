@@ -274,7 +274,10 @@ public sealed class PopupViewModel : INotifyPropertyChanged
 
     private void Rebuild()
     {
-        var all = _history.Items.Take(_limit).ToList();
+        // ApplyLimit rather than Take: the limit counts unpinned clips only, so the stored
+        // list can legitimately be longer and taking the first N off the top would hide
+        // the newest unpinned clips behind the pins.
+        var all = ClipboardHistoryView.ApplyLimit(_history.Items, _limit);
         var terms = ClipboardSearch.ParseTerms(_searchText);
         var source = terms.Length == 0
             ? all
