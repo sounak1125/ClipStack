@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Media.Animation;
 using ClipStack.ViewModels;
 
 namespace ClipStack.Views;
@@ -7,7 +8,6 @@ namespace ClipStack.Views;
 public partial class ClipboardPopupWindow : Window
 {
     private bool _suppressDeactivateHide;
-    private bool _openingSettings;
 
     /// <summary>Raised with true when Shift was held, meaning "invert the plain-text setting".</summary>
     public event Action<bool>? PasteRequested;
@@ -27,7 +27,16 @@ public partial class ClipboardPopupWindow : Window
 
     public void EndSuppressDeactivate() => _suppressDeactivateHide = false;
 
-    public void ScrollSelectionIntoView()
+    public void PlayOpenAnimation()
+    {
+        if (SystemParameters.ClientAreaAnimation)
+        {
+            PopupSurface.BeginAnimation(OpacityProperty,
+                new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(120)) { FillBehavior = FillBehavior.Stop });
+        }
+    }
+
+    public void ScrollSelectionIntoView(bool keepSearchFocus = true)
     {
         // Defer until layout has applied SelectedItem binding and the list is measured.
         Dispatcher.BeginInvoke(() =>
@@ -41,7 +50,7 @@ public partial class ClipboardPopupWindow : Window
                 var selected = ViewModel?.SelectedItem;
                 if (selected is null)
                 {
-                    if (!IsFilterFocused)
+                    if (!keepSearchFocus || !IsFilterFocused)
                         HistoryList.Focus();
                     return;
                 }
@@ -49,7 +58,7 @@ public partial class ClipboardPopupWindow : Window
                 HistoryList.ScrollIntoView(selected);
 
                 // Never pull focus out of the filter box while the user is typing.
-                if (IsFilterFocused)
+                if (keepSearchFocus && IsFilterFocused)
                     return;
 
                 if (HistoryList.ItemContainerGenerator.ContainerFromItem(selected) is System.Windows.Controls.ListBoxItem container)
@@ -69,32 +78,14 @@ public partial class ClipboardPopupWindow : Window
     /// <summary>Shift inverts the configured plain-text paste behaviour.</summary>
     private static bool IsShiftHeld => (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
 
-    private void ActivateFilter(PopupViewModel vm)
+    private void FocusFilter()
     {
-        vm.IsFilterVisible = true;
-
-        // The box is collapsed until this point, so it cannot take focus until layout runs.
-        Dispatcher.BeginInvoke(() =>
-        {
-            try
-            {
-                FilterBox.Focus();
-                FilterBox.CaretIndex = FilterBox.Text.Length;
-            }
-            catch
-            {
-                // Popup may already be closing.
-            }
-        }, System.Windows.Threading.DispatcherPriority.Input);
+        FilterBox.Focus();
+        FilterBox.CaretIndex = FilterBox.Text.Length;
     }
 
     private void ExitFilterToList(PopupViewModel vm)
     {
-        // Keep an active filter applied — the list stays narrowed and the normal
-        // 1-9 / Delete shortcuts operate on what is visible. An empty box just collapses.
-        if (!vm.HasSearchText)
-            vm.IsFilterVisible = false;
-
         var selected = vm.SelectedItem;
         if (selected is not null
             && HistoryList.ItemContainerGenerator.ContainerFromItem(selected) is System.Windows.Controls.ListBoxItem container)
@@ -125,7 +116,7 @@ public partial class ClipboardPopupWindow : Window
 
     private void OnDeactivated(object? sender, EventArgs e)
     {
-        if (_suppressDeactivateHide || _openingSettings)
+        if (_suppressDeactivateHide)
             return;
         CloseRequested?.Invoke();
     }
@@ -162,12 +153,15 @@ public partial class ClipboardPopupWindow : Window
             return;
         }
 
+        if (e.Key == Key.Enter && Keyboard.FocusedElement is System.Windows.Controls.Button)
+            return;
+
         // "/" is the primary filter key; Ctrl+F is the layout-independent equivalent for
         // keyboards where "/" is not on the OemQuestion key.
         if (e.Key is Key.OemQuestion or Key.Divide
             || (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control))
         {
-            ActivateFilter(vm);
+            FocusFilter();
             e.Handled = true;
             return;
         }
@@ -235,6 +229,8 @@ public partial class ClipboardPopupWindow : Window
         }
     }
 
+    private void OnFilterSurfaceClick(object sender, MouseButtonEventArgs e) => FocusFilter();
+
     private void MoveSelection(int delta)
     {
         var vm = ViewModel;
@@ -274,23 +270,20 @@ public partial class ClipboardPopupWindow : Window
         e.Handled = true;
     }
 
-    private static T? FindAncestor<T>(DependencyObject current) where T : DependencyObject
+    private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
     {
         while (current is not null)
         {
             if (current is T match)
                 return match;
-            current = System.Windows.Media.VisualTreeHelper.GetParent(current);
+            current = current is FrameworkContentElement content
+                ? content.Parent
+                : System.Windows.Media.VisualTreeHelper.GetParent(current);
         }
         return null;
     }
 
-    private void OnSettingsClick(object sender, RoutedEventArgs e)
-    {
-        _openingSettings = true;
-        try { SettingsRequested?.Invoke(); }
-        finally { _openingSettings = false; }
-    }
+    private void OnSettingsClick(object sender, RoutedEventArgs e) => SettingsRequested?.Invoke();
 
     private void OnCloseClick(object sender, RoutedEventArgs e) => CloseRequested?.Invoke();
 }

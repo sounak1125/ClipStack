@@ -2,10 +2,10 @@ using System.Collections.Specialized;
 using System.IO;
 using System.Windows;
 using System.Windows.Media.Imaging;
-using ClipStack.Core.Hashing;
 using ClipStack.Core.Models;
 using ClipStack.Core.Storage;
 using ClipStack.Core.Utilities;
+using ClipStack.Interop;
 
 namespace ClipStack.Services;
 
@@ -41,16 +41,17 @@ internal sealed class RestorePayloads
 
 internal sealed class ClipboardRestoreService
 {
+    internal const string RestoredFormat = "ClipStack.RestoredClip";
     private static readonly int[] RetryDelaysMs = [20, 40, 80, 120, 180, 250];
+    // Encrypted payloads are slightly larger on disk because of DPAPI framing.
+    private const long MaxStoredImageBytes = ImageSizeGuard.MaxEncodedBytes + 1024 * 1024;
 
     private readonly HistoryStore _history;
-    private readonly SelfCopySuppression _suppression;
     private readonly FileLogger _logger;
 
-    public ClipboardRestoreService(HistoryStore history, SelfCopySuppression suppression, FileLogger logger)
+    public ClipboardRestoreService(HistoryStore history, FileLogger logger)
     {
         _history = history;
-        _suppression = suppression;
         _logger = logger;
     }
 
@@ -75,21 +76,21 @@ internal sealed class ClipboardRestoreService
                 return RestoreResult.Fail("Could not restore this item.");
 
             Exception? last = null;
-            for (var i = 0; i < RetryDelaysMs.Length; i++)
+            for (var attempt = 0; attempt <= RetryDelaysMs.Length; attempt++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
                     Clipboard.SetDataObject(data, copy: true);
-                    _suppression.Arm(SuppressionHashes(item, payloads), TimeSpan.FromSeconds(2));
-                    _history.Touch(item.Id);
-                    return RestoreResult.Ok();
+                    return RestoreResult.Ok(NativeMethods.GetClipboardSequenceNumber());
                 }
                 catch (Exception ex)
                 {
                     last = ex;
-                    await Task.Delay(RetryDelaysMs[i], cancellationToken).ConfigureAwait(true);
                 }
+
+                if (attempt < RetryDelaysMs.Length)
+                    await Task.Delay(RetryDelaysMs[attempt], cancellationToken).ConfigureAwait(true);
             }
 
             if (last is not null)
@@ -106,32 +107,6 @@ internal sealed class ClipboardRestoreService
             _logger.Error("RestoreItem", ex);
             return RestoreResult.Fail("Restore failed.");
         }
-    }
-
-    /// <summary>
-    /// Every hash the clip we just published can be captured back as.
-    /// </summary>
-    /// <remarks>
-    /// A full restore puts back every stored format, so it re-hashes to the stored hash.
-    /// A plain-text restore publishes text alone and hashes to something else entirely,
-    /// so arming with the stored hash alone let the paste come straight back in as a new
-    /// clip — one duplicate plain-text row per Shift+Enter on a styled clip.
-    ///
-    /// Keyed off what was actually published rather than off the plain-text flag, so a
-    /// clip whose HTML or RTF payload has gone missing is covered by the same reasoning.
-    /// </remarks>
-    private static IReadOnlyCollection<string> SuppressionHashes(ClipboardItem item, RestorePayloads payloads)
-    {
-        var publishedTextOnly =
-            !string.IsNullOrEmpty(payloads.Text)
-            && string.IsNullOrEmpty(payloads.Html)
-            && string.IsNullOrEmpty(payloads.Rtf)
-            && payloads.Image is null
-            && payloads.ExistingFiles.Length == 0;
-
-        return publishedTextOnly
-            ? [item.ContentHash, ContentHasher.ComputeTextOnlyHash(payloads.Text!)]
-            : [item.ContentHash];
     }
 
     private RestorePayloads LoadPayloads(ClipboardItem item, bool plainTextOnly)
@@ -161,41 +136,9 @@ internal sealed class ClipboardRestoreService
                 return new RestorePayloads { MissingAllFiles = true };
         }
 
-        BitmapSource? image = null;
-        byte[]? png = null;
-
-        try
-        {
-            var original = _history.ReadPayloadBytes(item, ClipboardFormatKind.ImageOriginal);
-            if (original is { Length: > 0 })
-            {
-                image = ThumbnailService.LoadFrozenFromBytes(original);
-
-                // Expose raw PNG only when the original genuinely is one.
-                var originalPayload = item.Payloads.FirstOrDefault(p => p.Format == ClipboardFormatKind.ImageOriginal);
-                if (image is not null
-                    && originalPayload is not null
-                    && originalPayload.RelativePath.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
-                {
-                    png = original;
-                }
-            }
-
-            if (image is null)
-            {
-                var pngBytes = _history.ReadPayloadBytes(item, ClipboardFormatKind.ImagePng);
-                if (pngBytes is { Length: > 0 })
-                {
-                    image = ThumbnailService.LoadFrozenFromBytes(pngBytes);
-                    if (image is not null)
-                        png = pngBytes;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.Error("RestoreImage", ex);
-        }
+        var (image, png) = LoadImage(item, ClipboardFormatKind.ImageOriginal);
+        if (image is null)
+            (image, png) = LoadImage(item, ClipboardFormatKind.ImagePng);
 
         return new RestorePayloads
         {
@@ -207,6 +150,24 @@ internal sealed class ClipboardRestoreService
             ExistingFiles = existingFiles,
             MissingAllFiles = missingAllFiles,
         };
+    }
+
+    private (BitmapSource? Image, byte[]? Png) LoadImage(ClipboardItem item, ClipboardFormatKind format)
+    {
+        try
+        {
+            var bytes = _history.ReadPayloadBytes(item, format, maximumStoredBytes: MaxStoredImageBytes);
+            if (bytes is not { Length: > 0 })
+                return (null, null);
+
+            var image = ThumbnailService.LoadFrozenFromBytes(bytes, pngOnly: format == ClipboardFormatKind.ImagePng);
+            return (image, image is not null && ThumbnailService.HasPngSignature(bytes) ? bytes : null);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("RestoreImage", ex);
+            return (null, null);
+        }
     }
 
     private static DataObject? BuildDataObject(RestorePayloads payloads)
@@ -245,12 +206,15 @@ internal sealed class ClipboardRestoreService
             }
         }
 
+        // Let our listener skip this write before it reads any image bytes. The private
+        // format identifies the write even if a restored clip has fewer formats now.
+        data.SetData(RestoredFormat, new MemoryStream([1], writable: false), autoConvert: false);
         return data;
     }
 }
 
-internal readonly record struct RestoreResult(bool Success, string? Message)
+internal readonly record struct RestoreResult(bool Success, string? Message, uint ClipboardSequence)
 {
-    public static RestoreResult Ok() => new(true, null);
-    public static RestoreResult Fail(string message) => new(false, message);
+    public static RestoreResult Ok(uint clipboardSequence) => new(true, null, clipboardSequence);
+    public static RestoreResult Fail(string message) => new(false, message, 0);
 }

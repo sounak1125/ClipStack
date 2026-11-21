@@ -10,7 +10,7 @@ namespace ClipStack;
 internal static class Program
 {
     [STAThread]
-    private static void Main(string[] args)
+    private static void Main()
     {
         try
         {
@@ -41,7 +41,7 @@ internal static class Program
             var settings = new SettingsStore(paths);
             settings.Initialize(defaultStartWithWindows: installed);
 
-            var history = new HistoryStore(paths);
+            var history = new HistoryStore(paths) { EncryptPayloads = settings.Current.EncryptHistory };
             history.Initialize();
 
             var releaseStore = new ReleaseConfigStore(paths);
@@ -49,7 +49,7 @@ internal static class Program
             var release = releaseStore.Load(bundled);
 
             var app = new App();
-            controller = new AppController(logger, paths, settings, history, releaseStore, release, singleInstance);
+            controller = new AppController(logger, paths, settings, history, release, singleInstance);
             app.Attach(controller, logger);
 
             app.Startup += (_, _) =>

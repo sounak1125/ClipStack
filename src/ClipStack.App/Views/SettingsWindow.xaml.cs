@@ -160,7 +160,7 @@ public partial class SettingsWindow : Window
             return;
 
         // Keep whatever draft was captured; only Esc restores the prior value.
-        EndShortcutRecording(restorePrevious: false);
+        EndShortcutRecording();
     }
 
     private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
@@ -188,12 +188,6 @@ public partial class SettingsWindow : Window
             return;
 
         e.Handled = true;
-
-        if (key == Key.Escape)
-        {
-            CancelShortcutRecording();
-            return;
-        }
 
         if (IsModifierKey(key))
         {
@@ -259,19 +253,13 @@ public partial class SettingsWindow : Window
             return;
 
         _draftHotKey = _shortcutBeforeRecording.Clone();
-        EndShortcutRecording(restorePrevious: false);
+        EndShortcutRecording();
         // Move focus away so we don't immediately re-enter recording via GotFocus.
         MoveFocus(new TraversalRequest(FocusNavigationDirection.Next));
     }
 
-    private void EndShortcutRecording(bool restorePrevious)
+    private void EndShortcutRecording()
     {
-        if (!_isRecordingShortcut)
-            return;
-
-        if (restorePrevious)
-            _draftHotKey = _shortcutBeforeRecording.Clone();
-
         _isRecordingShortcut = false;
         RefreshShortcutDisplay();
     }
@@ -308,7 +296,7 @@ public partial class SettingsWindow : Window
     private void OnApplyShortcut(object sender, RoutedEventArgs e)
     {
         if (_isRecordingShortcut)
-            EndShortcutRecording(restorePrevious: false);
+            EndShortcutRecording();
 
         if (!_draftHotKey.IsValid)
         {
@@ -336,7 +324,7 @@ public partial class SettingsWindow : Window
     private void OnRestoreDefaultShortcut(object sender, RoutedEventArgs e)
     {
         if (_isRecordingShortcut)
-            EndShortcutRecording(restorePrevious: false);
+            EndShortcutRecording();
 
         _draftHotKey = HotKeyConfiguration.Default.Clone();
         RefreshShortcutDisplay();

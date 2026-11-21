@@ -18,9 +18,7 @@ internal sealed class AppController : IDisposable
     private readonly StoragePaths _paths;
     private readonly SettingsStore _settings;
     private readonly HistoryStore _history;
-    private readonly ReleaseConfigStore _releaseStore;
     private readonly NativeMessageWindow _native;
-    private readonly SelfCopySuppression _suppression;
     private readonly ThumbnailService _thumbnails;
     private readonly ClipboardFormatReader _formatReader;
     private readonly ClipboardCaptureService _capture;
@@ -42,13 +40,13 @@ internal sealed class AppController : IDisposable
     private UpdateNotificationWindow? _updateNotification;
     private bool _shuttingDown;
     private bool _disposed;
+    private bool _pasteInProgress;
 
     public AppController(
         FileLogger logger,
         StoragePaths paths,
         SettingsStore settings,
         HistoryStore history,
-        ReleaseConfigStore releaseStore,
         ReleaseConfiguration release,
         SingleInstanceService singleInstance)
     {
@@ -56,20 +54,18 @@ internal sealed class AppController : IDisposable
         _paths = paths;
         _settings = settings;
         _history = history;
-        _releaseStore = releaseStore;
         _singleInstance = singleInstance;
 
-        _suppression = new SelfCopySuppression();
         _thumbnails = new ThumbnailService(logger);
         _formatReader = new ClipboardFormatReader(logger, _thumbnails);
         _foreground = new ForegroundWindowService();
         _autoPaste = new AutoPasteService(logger);
         _position = new PopupPositionService();
         _startup = new StartupService(logger);
-        _updates = new UpdateService(settings, releaseStore, logger, release);
+        _updates = new UpdateService(settings, logger, release);
         _native = new NativeMessageWindow(logger);
-        _restore = new ClipboardRestoreService(history, _suppression, logger);
-        _capture = new ClipboardCaptureService(_native, _formatReader, history, settings, _suppression, logger);
+        _restore = new ClipboardRestoreService(history, logger);
+        _capture = new ClipboardCaptureService(_native, _formatReader, history, settings, logger);
         _tray = new TrayIconService(settings, _startup, logger);
         _popupVm = new PopupViewModel(history, logger);
         _popup = new ClipboardPopupWindow { DataContext = _popupVm };
@@ -78,7 +74,6 @@ internal sealed class AppController : IDisposable
     public void Start()
     {
         ApplyTheme(_settings.Current.Theme);
-        _history.EncryptPayloads = _settings.Current.EncryptHistory;
 
         _native.Create();
         _native.StartClipboardListener();
@@ -87,7 +82,7 @@ internal sealed class AppController : IDisposable
         if (!_native.TryRegisterHotKey(settings.HotKey))
         {
             _tray.ShowBalloon("The default shortcut is unavailable. Choose another in Settings.");
-            ShowSettings(forceHotKeyAttention: true);
+            ShowSettings();
         }
 
         WireEvents();
@@ -132,15 +127,13 @@ internal sealed class AppController : IDisposable
         _updates.UpdateReady += version =>
             Application.Current.Dispatcher.Invoke(() => ShowUpdateNotification(version));
 
-        // A clip stored in the clear when the user believes it is encrypted is exactly the
-        // kind of silent downgrade that must not stay silent.
         _history.EncryptionFailed += ex =>
         {
             _logger.Error("PayloadEncrypt", ex);
             if (_encryptionWarningCooldown.TryAcquire(TimeSpan.FromMinutes(10)))
             {
                 Application.Current.Dispatcher.Invoke(() =>
-                    _tray.ShowBalloon("Could not encrypt a clip — it was saved unencrypted."));
+                    _tray.ShowBalloon("Could not encrypt a clip. ClipStack skipped saving it."));
             }
         };
 
@@ -183,22 +176,18 @@ internal sealed class AppController : IDisposable
 
     public void ShowPopup()
     {
-        if (_shuttingDown) return;
+        if (_shuttingDown || _pasteInProgress) return;
         if (_popup.IsVisible)
         {
             RefreshPopup();
-            FocusMostRecentItem();
             _popup.Activate();
             _popup.Focus();
+            _popup.ScrollSelectionIntoView();
             return;
         }
 
         _foreground.Capture();
         RefreshPopup();
-        FocusMostRecentItem();
-
-        _popup.Width = 408;
-        _popup.Height = 360;
         _popup.Topmost = true;
         _popup.Opacity = 0;
         _popup.Show();
@@ -207,19 +196,14 @@ internal sealed class AppController : IDisposable
         _popup.Opacity = 1;
         _popup.Activate();
         _popup.Focus();
-        FocusMostRecentItem();
-    }
-
-    private void FocusMostRecentItem()
-    {
-        _popupVm.SelectMostRecent();
-        _popup.ScrollSelectionIntoView();
+        _popup.PlayOpenAnimation();
+        _popup.ScrollSelectionIntoView(keepSearchFocus: false);
     }
 
     private void RefreshPopup()
     {
         var s = _settings.Current;
-        _popupVm.Refresh(s.HistoryLimit, s.PauseCapture);
+        _popupVm.Refresh(s.HistoryLimit, s.PauseCapture, s.AutoPaste);
     }
 
     private void HidePopup()
@@ -234,24 +218,31 @@ internal sealed class AppController : IDisposable
     private async Task PasteSelectedAsync(bool shiftHeld = false)
     {
         var selected = _popupVm.SelectedItem;
-        if (selected is null) return;
+        if (selected is null || _pasteInProgress || _shuttingDown) return;
 
         // Snapshot before hide; mouse path must not depend on later ListBox state.
         var item = selected.Item;
         var settings = _settings.Current;
+        var target = _foreground.LastForeground;
+        var token = _lifetimeCts.Token;
 
         // Shift inverts the configured behaviour, so whichever mode is the default the
         // other one is always a single modifier away.
         var plainTextOnly = settings.PasteAsPlainText ^ shiftHeld;
 
-        // Hide first so Windows can return activation to the captured target
-        // (plain SetForegroundWindow often fails after a mouse click on our popup).
-        _popup.BeginSuppressDeactivate();
+        _pasteInProgress = true;
         try
         {
-            HidePopup();
+            _popup.BeginSuppressDeactivate();
+            try { HidePopup(); }
+            finally { _popup.EndSuppressDeactivate(); }
 
-            var result = await _restore.RestoreAsync(item, plainTextOnly).ConfigureAwait(true);
+            // Return focus while the image is still loading so the original app can
+            // process its activation before the paste. Never re-activate it later.
+            var restoreTask = _restore.RestoreAsync(item, plainTextOnly, token);
+            if (settings.AutoPaste)
+                await _foreground.RestoreFocusAsync(token).ConfigureAwait(true);
+            var result = await restoreTask.ConfigureAwait(true);
             if (!result.Success)
             {
                 _tray.ShowBalloon(result.Message ?? "Restore failed.");
@@ -261,27 +252,31 @@ internal sealed class AppController : IDisposable
             if (!settings.AutoPaste)
             {
                 _tray.ShowBalloon(plainTextOnly ? "Copied as plain text." : "Copied to clipboard.");
-                return;
             }
-
-            var focusOk = await _foreground.TryRestoreAsync(_lifetimeCts.Token).ConfigureAwait(true);
-            if (focusOk)
+            else
             {
-                // Brief settle so OLE clipboard + target caret are ready (images especially).
-                await Task.Delay(50, _lifetimeCts.Token).ConfigureAwait(true);
+                var paste = await _autoPaste.TryPasteAsync(target, result.ClipboardSequence, token)
+                    .ConfigureAwait(true);
+                if (paste == AutoPasteResult.Unavailable)
+                    _tray.ShowBalloon("Copied to clipboard. Press Ctrl+V to paste.");
+                else if (paste == AutoPasteResult.ClipboardChanged)
+                    _tray.ShowBalloon("The clipboard changed before ClipStack could paste.");
             }
 
-            var pasteOk = focusOk && _autoPaste.TrySendCtrlV();
-            if (!pasteOk)
-                _tray.ShowBalloon("Copied to clipboard — press Ctrl+V to paste.");
+            // Persist recency after dispatch so writing the history index cannot delay Ctrl+V.
+            await Task.Run(() => _history.Touch(item.Id), token).ConfigureAwait(true);
         }
         catch (OperationCanceledException)
         {
             // Shutting down.
         }
+        catch (Exception ex)
+        {
+            _logger.Error("PasteSelected", ex);
+        }
         finally
         {
-            _popup.EndSuppressDeactivate();
+            _pasteInProgress = false;
         }
     }
 
@@ -403,7 +398,7 @@ internal sealed class AppController : IDisposable
         _updateNotification.Show();
     }
 
-    private void ShowSettings(bool forceHotKeyAttention = false)
+    private void ShowSettings()
     {
         _popup.BeginSuppressDeactivate();
         HidePopup();
@@ -435,10 +430,6 @@ internal sealed class AppController : IDisposable
         _settingsWindow.Show();
         _settingsWindow.Activate();
 
-        if (forceHotKeyAttention)
-        {
-            // Settings already open for hotkey conflict.
-        }
     }
 
     private bool TryChangeHotKey(HotKeyConfiguration config)

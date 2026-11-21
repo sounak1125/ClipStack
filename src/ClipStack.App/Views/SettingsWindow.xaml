@@ -179,8 +179,7 @@
                 </ToggleButton.Template>
               </ToggleButton>
 
-              <ContentPresenter x:Name="ContentSite"
-                                IsHitTestVisible="False"
+              <ContentPresenter IsHitTestVisible="False"
                                 Margin="{TemplateBinding Padding}"
                                 VerticalAlignment="Center"
                                 HorizontalAlignment="Left"

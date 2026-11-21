@@ -17,21 +17,35 @@ public sealed class HistoryStore
     private readonly StoragePaths _paths;
     private readonly object _gate = new();
     private ClipboardIndex _index = new();
+    private volatile bool _encryptPayloads = true;
+    private bool _initialized;
 
     public HistoryStore(StoragePaths paths)
     {
         _paths = paths;
     }
 
-    public StoragePaths Paths => _paths;
-
     /// <summary>
-    /// Whether new payloads are written encrypted. Reads always handle both, so turning
-    /// this off leaves existing encrypted clips readable and vice versa.
+    /// Whether to encrypt new payloads and index writes. Reads support both formats.
     /// </summary>
-    public bool EncryptPayloads { get; set; } = true;
+    public bool EncryptPayloads
+    {
+        get => _encryptPayloads;
+        set
+        {
+            lock (_gate)
+            {
+                if (value == _encryptPayloads)
+                    return;
 
-    /// <summary>Raised when a payload could not be encrypted and was stored in the clear.</summary>
+                if (_initialized)
+                    SaveIndexAtomic_NoLock(value);
+                _encryptPayloads = value;
+            }
+        }
+    }
+
+    /// <summary>Raised when a clip could not be saved with encryption enabled.</summary>
     public event Action<Exception>? EncryptionFailed;
 
     public IReadOnlyList<ClipboardItem> Items
@@ -50,7 +64,11 @@ public sealed class HistoryStore
         _index = LoadOrRecoverIndex();
         ValidateAndPruneMissingPayloads();
         BackfillMissingMetadata();
-        SaveIndexAtomic();
+        lock (_gate)
+        {
+            SaveIndexAtomic_NoLock();
+            _initialized = true;
+        }
     }
 
     /// <summary>
@@ -90,12 +108,6 @@ public sealed class HistoryStore
                 // best effort; the index still has everything while it stays readable
             }
         }
-    }
-
-    public ClipboardItem? FindByHash(string contentHash)
-    {
-        lock (_gate)
-            return _index.Items.FirstOrDefault(i => string.Equals(i.ContentHash, contentHash, StringComparison.OrdinalIgnoreCase));
     }
 
     public ClipboardItem? GetById(Guid id)
@@ -245,8 +257,7 @@ public sealed class HistoryStore
         NewClipboardItemData data,
         ClipboardItemMetadata metadata)
     {
-        if (Directory.Exists(tempDir))
-            Directory.Delete(tempDir, recursive: true);
+        PathSafety.ThrowIfReparsePoint(tempDir);
         Directory.CreateDirectory(tempDir);
 
         var payloads = new List<ClipboardPayload>();
@@ -260,7 +271,7 @@ public sealed class HistoryStore
             if (fileName.Equals(PayloadFileNames.Metadata, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Payload may not claim the reserved metadata file name.");
 
-            var fullPath = Path.Combine(tempDir, fileName);
+            var fullPath = PathSafety.ResolveSafeRelativePath(tempDir, fileName);
 
             var encrypted = false;
             var toWrite = request.Bytes;
@@ -274,11 +285,8 @@ public sealed class HistoryStore
                 }
                 catch (Exception ex)
                 {
-                    // Storing the clip in the clear beats losing it, but the user
-                    // must not be told it is encrypted when it is not.
                     EncryptionFailed?.Invoke(ex);
-                    toWrite = request.Bytes;
-                    encrypted = false;
+                    throw;
                 }
             }
 
@@ -299,8 +307,6 @@ public sealed class HistoryStore
         // Into the temp folder too, so the sidecar lands atomically with what it describes.
         WriteMetadata(tempDir, metadata);
 
-        if (Directory.Exists(finalDir))
-            Directory.Delete(finalDir, recursive: true);
         Directory.Move(tempDir, finalDir);
 
         return (payloads, totalSize);
@@ -321,12 +327,12 @@ public sealed class HistoryStore
             }
             catch (Exception ex)
             {
-                // Same bargain as a payload: storing it readable beats losing it.
                 EncryptionFailed?.Invoke(ex);
+                throw;
             }
         }
 
-        File.WriteAllBytes(Path.Combine(dir, PayloadFileNames.Metadata), bytes);
+        File.WriteAllBytes(PathSafety.ResolveSafeRelativePath(dir, PayloadFileNames.Metadata), bytes);
     }
 
     private static ClipboardItemMetadata? TryReadMetadata(string dir)
@@ -498,6 +504,9 @@ public sealed class HistoryStore
             ids = _index.Items.Select(i => i.Id).ToList();
             _index.Items.Clear();
             SaveIndexAtomic_NoLock();
+            foreach (var backup in Directory.EnumerateFiles(_paths.Root, "index.corrupt.*.json"))
+                TryDeleteIndexBackup(backup);
+            TryDeleteIndexBackup(_paths.IndexFile + ".bak");
         }
 
         foreach (var id in ids)
@@ -523,16 +532,9 @@ public sealed class HistoryStore
 
     public string ResolvePayloadPath(ClipboardItem item, ClipboardPayload payload)
     {
+        PathSafety.ThrowIfReparsePoint(_paths.Items);
         var itemDir = _paths.GetItemDirectory(item.Id);
         return PathSafety.ResolveSafeRelativePath(itemDir, payload.RelativePath);
-    }
-
-    public string? ResolveThumbnailPath(ClipboardItem item)
-    {
-        if (string.IsNullOrWhiteSpace(item.ThumbnailRelativePath))
-            return null;
-        var itemDir = _paths.GetItemDirectory(item.Id);
-        return PathSafety.ResolveSafeRelativePath(itemDir, item.ThumbnailRelativePath);
     }
 
     public long CalculateDiskUsageBytes()
@@ -541,7 +543,8 @@ public sealed class HistoryStore
             return 0;
 
         long total = 0;
-        foreach (var file in Directory.EnumerateFiles(_paths.Items, "*", SearchOption.AllDirectories))
+        var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
+        foreach (var file in Directory.EnumerateFiles(_paths.Items, "*", options))
         {
             try { total += new FileInfo(file).Length; }
             catch { /* ignore */ }
@@ -557,7 +560,7 @@ public sealed class HistoryStore
         return total;
     }
 
-    public byte[]? ReadPayloadBytes(ClipboardItem item, ClipboardFormatKind format)
+    public byte[]? ReadPayloadBytes(ClipboardItem item, ClipboardFormatKind format, long? maximumStoredBytes = null)
     {
         var payload = item.Payloads.FirstOrDefault(p => p.Format == format);
         if (payload is null)
@@ -567,7 +570,16 @@ public sealed class HistoryStore
         if (!File.Exists(path))
             return null;
 
-        var stored = File.ReadAllBytes(path);
+        byte[] stored;
+        using (var stream = File.OpenRead(path))
+        {
+            var size = stream.Length;
+            if (size > Array.MaxLength || size > maximumStoredBytes)
+                return null;
+
+            stored = new byte[(int)size];
+            stream.ReadExactly(stored);
+        }
 
         // Dispatch on the file's own header rather than the index flag, so a payload
         // stays readable even if the index disagrees with what is on disk.
@@ -623,7 +635,10 @@ public sealed class HistoryStore
 
         try
         {
-            var json = File.ReadAllText(_paths.IndexFile, Encoding.UTF8);
+            PathSafety.ThrowIfReparsePoint(_paths.IndexFile);
+            var json = PayloadProtector.Unprotect(File.ReadAllBytes(_paths.IndexFile)).AsSpan();
+            if (json.StartsWith(Encoding.UTF8.Preamble))
+                json = json[Encoding.UTF8.Preamble.Length..];
             return JsonSerializer.Deserialize<ClipboardIndex>(json, AppIdentity.JsonOptions)
                    ?? throw new InvalidDataException("Index deserialized to null.");
         }
@@ -631,33 +646,6 @@ public sealed class HistoryStore
         {
             BackupCorruptIndex();
             return ReconstructFromFolders();
-        }
-    }
-
-    private void ValidateItemPaths(ClipboardItem item)
-    {
-        foreach (var payload in item.Payloads)
-        {
-            if (string.IsNullOrWhiteSpace(payload.RelativePath)
-                || payload.RelativePath.Contains("..", StringComparison.Ordinal)
-                || Path.IsPathRooted(payload.RelativePath))
-            {
-                throw new InvalidDataException("Unsafe payload path in index.");
-            }
-
-            var itemRoot = _paths.GetItemDirectory(item.Id);
-            var full = Path.GetFullPath(Path.Combine(itemRoot, payload.RelativePath));
-            if (!PathSafety.IsPathInsideRoot(itemRoot, full))
-                throw new InvalidDataException("Path traversal in index.");
-        }
-
-        if (!string.IsNullOrWhiteSpace(item.ThumbnailRelativePath))
-        {
-            if (item.ThumbnailRelativePath.Contains("..", StringComparison.Ordinal)
-                || Path.IsPathRooted(item.ThumbnailRelativePath))
-            {
-                throw new InvalidDataException("Unsafe thumbnail path in index.");
-            }
         }
     }
 
@@ -691,6 +679,7 @@ public sealed class HistoryStore
 
             try
             {
+                PathSafety.ThrowIfReparsePoint(dir);
                 var item = ReconstructItem(id, dir);
                 if (item is not null)
                     index.Items.Add(item);
@@ -716,6 +705,7 @@ public sealed class HistoryStore
     {
         try
         {
+            PathSafety.ThrowIfReparsePoint(path);
             var stored = File.ReadAllBytes(path);
             return PayloadProtector.IsProtected(stored)
                 ? PayloadProtector.Unprotect(stored)
@@ -734,7 +724,7 @@ public sealed class HistoryStore
 
         void AddIfExists(ClipboardFormatKind format, string fileName)
         {
-            var path = Path.Combine(dir, fileName);
+            var path = PathSafety.ResolveSafeRelativePath(dir, fileName);
             if (!File.Exists(path)) return;
             var len = new FileInfo(path).Length;
             total += len;
@@ -881,7 +871,8 @@ public sealed class HistoryStore
         {
             try
             {
-                ValidateItemPaths(item);
+                if (!string.IsNullOrWhiteSpace(item.ThumbnailRelativePath))
+                    PathSafety.ResolveSafeRelativePath(_paths.GetItemDirectory(item.Id), item.ThumbnailRelativePath);
             }
             catch
             {
@@ -941,22 +932,17 @@ public sealed class HistoryStore
         }
     }
 
-    private void SaveIndexAtomic()
-    {
-        lock (_gate)
-            SaveIndexAtomic_NoLock();
-    }
-
-    private void SaveIndexAtomic_NoLock()
+    private void SaveIndexAtomic_NoLock(bool? encrypt = null)
     {
         _paths.EnsureCreated();
         var tmp = _paths.IndexFile + ".tmp";
-        var json = JsonSerializer.Serialize(_index, AppIdentity.JsonOptions);
+        var json = JsonSerializer.SerializeToUtf8Bytes(_index, AppIdentity.JsonOptions);
+        var bytes = (encrypt ?? EncryptPayloads) ? PayloadProtector.Protect(json) : json;
+        PathSafety.ThrowIfReparsePoint(tmp);
+        PathSafety.ThrowIfReparsePoint(_paths.IndexFile);
         using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
-        using (var writer = new StreamWriter(fs, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
         {
-            writer.Write(json);
-            writer.Flush();
+            fs.Write(bytes);
             fs.Flush(flushToDisk: true);
         }
 
@@ -973,6 +959,7 @@ public sealed class HistoryStore
     {
         try
         {
+            PathSafety.ThrowIfReparsePoint(path);
             if (Directory.Exists(path))
                 Directory.Delete(path, recursive: true);
         }
@@ -980,5 +967,12 @@ public sealed class HistoryStore
         {
             // best effort
         }
+    }
+
+    private static void TryDeleteIndexBackup(string path)
+    {
+        try { File.Delete(path); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 }

@@ -26,6 +26,7 @@ public static class PathSafety
     {
         if (string.IsNullOrWhiteSpace(relativePath)
             || relativePath.Contains("..", StringComparison.Ordinal)
+            || relativePath.Contains(':')
             || Path.IsPathRooted(relativePath))
         {
             throw new InvalidOperationException("Unsafe relative path.");
@@ -35,25 +36,27 @@ public static class PathSafety
         if (!IsPathInsideRoot(rootDirectory, combined))
             throw new InvalidOperationException("Path traversal detected.");
 
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDirectory));
+        ThrowIfReparsePoint(root);
+        var current = root;
+        var relative = Path.GetRelativePath(root, combined);
+        foreach (var component in relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, component);
+            ThrowIfReparsePoint(current);
+        }
         return combined;
     }
 
-    public static async Task AtomicReplaceFileAsync(string destinationPath, string temporaryPath, CancellationToken cancellationToken = default)
+    internal static void ThrowIfReparsePoint(string path)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
-
-        if (File.Exists(destinationPath))
+        try
         {
-            File.Replace(temporaryPath, destinationPath, destinationPath + ".bak", ignoreMetadataErrors: true);
-            try { File.Delete(destinationPath + ".bak"); } catch { /* best effort */ }
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("Unexpected link in ClipStack storage.");
         }
-        else
-        {
-            File.Move(temporaryPath, destinationPath);
-        }
-
-        await Task.CompletedTask.ConfigureAwait(false);
+        catch (FileNotFoundException) { }
+        catch (DirectoryNotFoundException) { }
     }
 
     public static void AtomicReplaceFile(string destinationPath, string temporaryPath)

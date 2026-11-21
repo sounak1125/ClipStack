@@ -1,6 +1,6 @@
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Interop;
-using ClipStack.Core.Models;
 using ClipStack.Core.Utilities;
 using ClipStack.Interop;
 
@@ -83,45 +83,33 @@ internal sealed class PopupPositionService
 
 internal sealed class ForegroundWindowService
 {
-    private IntPtr _lastForeground;
+    public IntPtr LastForeground { get; private set; }
 
-    public void Capture()
+    public void Capture() => LastForeground = NativeMethods.GetForegroundWindow();
+
+    public async Task RestoreFocusAsync(CancellationToken cancellationToken)
     {
-        var hwnd = NativeMethods.GetForegroundWindow();
-        if (hwnd != IntPtr.Zero)
-            _lastForeground = hwnd;
-    }
+        var target = LastForeground;
+        if (target == IntPtr.Zero || !NativeMethods.IsWindow(target))
+            return;
 
-    public IntPtr LastForeground => _lastForeground;
+        if (NativeMethods.GetForegroundWindow() == target)
+            return;
 
-    public async Task<bool> TryRestoreAsync(CancellationToken cancellationToken = default)
-    {
-        if (_lastForeground == IntPtr.Zero || !NativeMethods.IsWindow(_lastForeground))
-            return false;
+        if (NativeMethods.IsIconic(target))
+            NativeMethods.ShowWindow(target, NativeMethods.SW_RESTORE);
 
-        try
+        NativeMethods.SetForegroundWindow(target);
+
+        for (var attempt = 0; attempt < 12; attempt++)
         {
-            if (NativeMethods.IsIconic(_lastForeground))
-                NativeMethods.ShowWindow(_lastForeground, NativeMethods.SW_RESTORE);
+            if (NativeMethods.GetForegroundWindow() == target)
+                return;
 
-            ForceForeground(_lastForeground);
+            if (attempt is 2 or 6)
+                ForceForeground(target);
 
-            for (var attempt = 0; attempt < 12; attempt++)
-            {
-                if (NativeMethods.GetForegroundWindow() == _lastForeground)
-                    return true;
-
-                if (attempt is 2 or 6)
-                    ForceForeground(_lastForeground);
-
-                await Task.Delay(30, cancellationToken).ConfigureAwait(true);
-            }
-
-            return NativeMethods.GetForegroundWindow() == _lastForeground;
-        }
-        catch
-        {
-            return false;
+            await Task.Delay(30, cancellationToken).ConfigureAwait(true);
         }
     }
 
@@ -134,25 +122,26 @@ internal sealed class ForegroundWindowService
         var targetThread = NativeMethods.GetWindowThreadProcessId(hwnd, out _);
         var currentThread = NativeMethods.GetCurrentThreadId();
 
-        if (targetThread != 0 && targetThread != currentThread)
-        {
-            NativeMethods.AttachThreadInput(currentThread, targetThread, true);
-            try
-            {
-                NativeMethods.BringWindowToTop(hwnd);
-                NativeMethods.SetForegroundWindow(hwnd);
-            }
-            finally
-            {
-                NativeMethods.AttachThreadInput(currentThread, targetThread, false);
-            }
-        }
-        else
+        var attached = targetThread != 0 && targetThread != currentThread
+            && NativeMethods.AttachThreadInput(currentThread, targetThread, true);
+        try
         {
             NativeMethods.BringWindowToTop(hwnd);
             NativeMethods.SetForegroundWindow(hwnd);
         }
+        finally
+        {
+            if (attached)
+                NativeMethods.AttachThreadInput(currentThread, targetThread, false);
+        }
     }
+}
+
+internal enum AutoPasteResult
+{
+    Sent,
+    Unavailable,
+    ClipboardChanged,
 }
 
 internal sealed class AutoPasteService
@@ -164,7 +153,56 @@ internal sealed class AutoPasteService
         _logger = logger;
     }
 
-    public bool TrySendCtrlV()
+    public async Task<AutoPasteResult> TryPasteAsync(
+        IntPtr target,
+        uint clipboardSequence,
+        CancellationToken cancellationToken)
+    {
+        var restoredFormat = (uint)DataFormats.GetDataFormat(ClipboardRestoreService.RestoredFormat).Id;
+        var elapsed = Stopwatch.StartNew();
+        do
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (NativeMethods.GetClipboardSequenceNumber() != clipboardSequence)
+                return AutoPasteResult.ClipboardChanged;
+
+            if (target == IntPtr.Zero || NativeMethods.GetForegroundWindow() != target)
+                return AutoPasteResult.Unavailable;
+
+            // A held modifier (including Shift for plain-text paste) changes Ctrl+V.
+            // An open clipboard can also make the target miss the paste. Wait for both
+            // before sending one shortcut, since a second shortcut could paste twice.
+            if (!PasteKeysAreDown() && NativeMethods.OpenClipboard(IntPtr.Zero))
+            {
+                var isRestoredClip = NativeMethods.IsClipboardFormatAvailable(restoredFormat);
+                if (!NativeMethods.CloseClipboard())
+                    return AutoPasteResult.Unavailable;
+
+                if (!isRestoredClip || NativeMethods.GetClipboardSequenceNumber() != clipboardSequence)
+                    return AutoPasteResult.ClipboardChanged;
+
+                return NativeMethods.GetForegroundWindow() == target && TrySendCtrlV()
+                    ? AutoPasteResult.Sent
+                    : AutoPasteResult.Unavailable;
+            }
+
+            await Task.Delay(20, cancellationToken).ConfigureAwait(true);
+        }
+        while (elapsed.ElapsedMilliseconds < 1000);
+
+        return AutoPasteResult.Unavailable;
+    }
+
+    private static bool PasteKeysAreDown() =>
+        NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) < 0
+        || NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) < 0
+        || NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) < 0
+        || NativeMethods.GetAsyncKeyState(NativeMethods.VK_LWIN) < 0
+        || NativeMethods.GetAsyncKeyState(NativeMethods.VK_RWIN) < 0
+        || NativeMethods.GetAsyncKeyState(NativeMethods.VK_V) < 0;
+
+    private bool TrySendCtrlV()
     {
         try
         {

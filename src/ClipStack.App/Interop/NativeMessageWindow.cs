@@ -25,10 +25,6 @@ internal sealed class NativeMessageWindow : IDisposable
         _logger = logger;
     }
 
-    public IntPtr Handle => _source?.Handle ?? IntPtr.Zero;
-
-    public bool IsHotKeyRegistered => _hotKeyRegistered;
-
     public HotKeyConfiguration? RegisteredHotKey => _registeredHotKey?.Clone();
 
     public void Create()

@@ -14,7 +14,7 @@ It is a native **C# / WPF / .NET 10** desktop app (not Electron, not Chromium, n
 - Paste as plain text, stripping HTML/RTF
 - Default history of **50** items (configurable 1–50)
 - Global shortcut default: **Ctrl + Shift + S**
-- Compact floating popup near the cursor, with a filter box (`/`)
+- Compact floating popup near the cursor with an always-visible search field
 - System tray app (no taskbar window during normal use)
 - Local-only storage under `%LocalAppData%\ClipStack`
 - Velopack installer + automatic GitHub update support
@@ -62,26 +62,17 @@ at rest is what covers those clips.
 
 ### Encryption at rest
 
-Payload files are encrypted with **DPAPI** under your Windows account (**Encrypt history
-on disk**, on by default). The key derives from your Windows credentials and is never
-stored by ClipStack, so another account on the same machine cannot read the history even
-with full file access.
+With **Encrypt history on disk** enabled, ClipStack uses Windows DPAPI to protect the
+history index and new payload files under your Windows account. Programs running under
+your account have access to the same DPAPI keys as ClipStack.
 
-What this does **not** protect against: code already running as you, which can decrypt
-exactly as ClipStack does. It raises the cost of offline disk access, not of local malware.
+- On upgrade, ClipStack rewrites the index according to your encryption setting. Existing
+  payload files stay readable in their original format.
+- Changing the setting rewrites the index and applies the new setting to future captures.
+- Clearing history also removes corrupt-index backups, which can contain legacy previews.
+- ClipStack reports a payload it cannot decrypt, such as one encrypted by another account.
 
-Each encrypted file carries a short header and reads dispatch on that header, not on the
-index. So:
-
-- History written before this version stays readable and is never rewritten.
-- Encryption applies from the next capture onward — upgrading is a no-op.
-- Turning the setting off later leaves earlier encrypted clips readable, and vice versa.
-- A clip that cannot be decrypted (encrypted under a different account, or after a
-  credential reset) is reported rather than returned as garbage.
-
-If a clip cannot be encrypted it is stored in the clear rather than lost, and you are
-notified — a clip silently stored unencrypted while the setting claims otherwise would be
-the worst outcome.
+If ClipStack cannot encrypt a new clip, it skips saving the clip and shows a notification.
 
 DPAPI costs roughly 50 ms per megabyte. Both encryption and decryption run on background
 threads, so even a 50 MB image (~2.5 s to encrypt, ~3.4 s to decrypt) never blocks the
@@ -103,7 +94,7 @@ In the popup:
 | Shift + Enter | Paste selected as plain text |
 | Shift + `1`-`9` / `0` | Paste that item as plain text |
 | Ctrl + P | Pin / unpin selected item |
-| `/` or Ctrl + F | Open the filter box |
+| `/` or Ctrl + F | Focus the search field |
 | Esc | Hide popup |
 
 Mouse click also pastes; Shift+click pastes as plain text. Window deactivation
@@ -133,9 +124,8 @@ survives a history rebuilt from folders. See [Recovery](#recovery).
 
 ### Filtering
 
-The list keeps focus when the popup opens, so every shortcut above works immediately.
-Press `/` (or Ctrl + F, for layouts where `/` is not on the `OemQuestion` key) to reveal
-the filter box.
+The list gets focus when the popup opens, so every shortcut above works immediately.
+Click the search field or press `/` or Ctrl + F to start filtering.
 
 | Key | Action while the filter box has focus |
 |-----|----------------------------------------|
@@ -242,7 +232,7 @@ Approximate idle memory (does not kill an existing instance):
 Pinned package/tool version: **Velopack / vpk 1.2.0**
 
 ```powershell
-.\tools\build-release.ps1 -Version 1.0.3
+.\tools\build-release.ps1 -Version 1.0.5
 ```
 
 This will:
@@ -252,6 +242,9 @@ This will:
 3. Publish self-contained `win-x64` (not single-file)
 4. Package with `vpk pack`
 5. Write installer/update files under `artifacts\releases`
+
+Use `-ArtifactsDirectory artifacts/1.0.5` for an isolated build. To generate a delta,
+download the previous published full package into the matching `releases` folder first.
 
 Output:
 
@@ -299,8 +292,8 @@ restarts. Setup.exe is only for a first install.
 Push a semantic-version tag to run the release workflow:
 
 ```powershell
-git tag v1.0.3
-git push origin v1.0.3
+git tag v1.0.5
+git push origin v1.0.5
 ```
 
 The GitHub Actions workflow downloads the previous Velopack release metadata,
@@ -374,7 +367,7 @@ the system tray, shortcuts, portable builds, and installer packages.
 - Copy ordinary text from the same app; confirm it still captures
 
 ### Filtering
-- `/` and Ctrl + F both open the filter box
+- Click the search field or press `/` or Ctrl + F to focus it
 - Type to narrow; confirm header shows `matched / total`
 - Digits and Delete edit the query instead of pasting/deleting while the box has focus
 - ↑ / ↓ and Enter still work from inside the box

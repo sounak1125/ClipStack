@@ -12,7 +12,6 @@ internal sealed class ClipboardCaptureService
     private readonly ClipboardFormatReader _reader;
     private readonly HistoryStore _history;
     private readonly SettingsStore _settings;
-    private readonly SelfCopySuppression _suppression;
     private readonly FileLogger _logger;
     private readonly NotificationCooldown _oversizedCooldown = new();
     private readonly object _gate = new();
@@ -30,14 +29,12 @@ internal sealed class ClipboardCaptureService
         ClipboardFormatReader reader,
         HistoryStore history,
         SettingsStore settings,
-        SelfCopySuppression suppression,
         FileLogger logger)
     {
         _native = native;
         _reader = reader;
         _history = history;
         _settings = settings;
-        _suppression = suppression;
         _logger = logger;
     }
 
@@ -169,9 +166,6 @@ internal sealed class ClipboardCaptureService
                 NotifyUser?.Invoke("Clipboard item skipped — exceeds size limit.");
             return;
         }
-
-        if (_suppression.ShouldIgnore(data.ContentHash))
-            return;
 
         try
         {

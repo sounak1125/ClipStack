@@ -53,7 +53,7 @@ internal static class ClipboardExclusionDetector
         return false;
     }
 
-    private static bool IsPresent(IDataObject data, string format, FileLogger logger)
+    internal static bool IsPresent(IDataObject data, string format, FileLogger logger)
     {
         try
         {

@@ -58,11 +58,12 @@ public class IndexRecoveryTests
         store.TogglePin(pinned.Id);
         var doomed = store.AddOrPromote(TextItem("unsafe entry"), 10).Item;
 
-        // Corrupt exactly one entry's payload path, leaving the file itself valid JSON.
-        var indexPath = Path.Combine(_root, "index.json");
-        var index = JsonSerializer.Deserialize<ClipboardIndex>(File.ReadAllText(indexPath), AppIdentity.JsonOptions)!;
+        // Modify one entry while preserving the index's format and encryption.
+        var indexPath = new StoragePaths(_root).IndexFile;
+        var json = PayloadProtector.Unprotect(File.ReadAllBytes(indexPath));
+        var index = JsonSerializer.Deserialize<ClipboardIndex>(json, AppIdentity.JsonOptions)!;
         index.Items.First(i => i.Id == doomed.Id).Payloads[0].RelativePath = "..\\..\\evil.txt";
-        File.WriteAllText(indexPath, JsonSerializer.Serialize(index, AppIdentity.JsonOptions));
+        File.WriteAllBytes(indexPath, PayloadProtector.Protect(JsonSerializer.SerializeToUtf8Bytes(index, AppIdentity.JsonOptions)));
 
         var reopened = NewStore();
 
@@ -77,6 +78,18 @@ public class IndexRecoveryTests
         Assert.IsFalse(
             Directory.EnumerateFiles(_root, "index.corrupt.*.json").Any(),
             "A single bad entry is not whole-file corruption.");
+    }
+
+    [TestMethod]
+    public void ClearAll_RemovesCorruptIndexBackups()
+    {
+        var store = NewStore();
+        store.AddOrPromote(TextItem("recoverable clip"), 10);
+        CorruptIndexFile();
+
+        var reopened = NewStore();
+        Assert.AreEqual(1, reopened.ClearAll());
+        Assert.IsFalse(Directory.EnumerateFiles(_root, "index.corrupt.*.json").Any());
     }
 
     /// <summary>

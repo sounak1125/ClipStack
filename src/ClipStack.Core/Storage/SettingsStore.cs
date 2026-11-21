@@ -47,16 +47,6 @@ public sealed class SettingsStore
         }
     }
 
-    public void Replace(AppSettings settings)
-    {
-        lock (_gate)
-        {
-            _settings = settings.Clone();
-            _settings.ValidateAndClamp();
-            Save_NoLock(_settings);
-        }
-    }
-
     private AppSettings LoadOrDefault(bool defaultStartWithWindows)
     {
         if (!File.Exists(_paths.SettingsFile))

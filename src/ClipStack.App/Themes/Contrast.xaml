@@ -11,10 +11,6 @@
   <Color x:Key="SelectedColor">#FF1A1A1A</Color>
   <Color x:Key="HoverColor">#FF141414</Color>
   <Color x:Key="HeaderColor">#FF000000</Color>
-  <Color x:Key="TextKindColor">#FFBDBDBD</Color>
-  <Color x:Key="RichTextKindColor">#FFBDBDBD</Color>
-  <Color x:Key="ImageKindColor">#FFBDBDBD</Color>
-  <Color x:Key="FilesKindColor">#FFBDBDBD</Color>
 
   <SolidColorBrush x:Key="BgBrush" Color="{StaticResource BgColor}" />
   <SolidColorBrush x:Key="SurfaceBrush" Color="{StaticResource SurfaceColor}" />
@@ -27,8 +23,4 @@
   <SolidColorBrush x:Key="SelectedBrush" Color="{StaticResource SelectedColor}" />
   <SolidColorBrush x:Key="HoverBrush" Color="{StaticResource HoverColor}" />
   <SolidColorBrush x:Key="HeaderBrush" Color="{StaticResource HeaderColor}" />
-  <SolidColorBrush x:Key="TextKindBrush" Color="{StaticResource TextKindColor}" />
-  <SolidColorBrush x:Key="RichTextKindBrush" Color="{StaticResource RichTextKindColor}" />
-  <SolidColorBrush x:Key="ImageKindBrush" Color="{StaticResource ImageKindColor}" />
-  <SolidColorBrush x:Key="FilesKindBrush" Color="{StaticResource FilesKindColor}" />
 </ResourceDictionary>

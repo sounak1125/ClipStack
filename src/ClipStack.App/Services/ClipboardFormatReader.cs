@@ -27,6 +27,7 @@ internal sealed class ClipboardSnapshot
 
     /// <summary>Raw bytes of the clipboard's own "PNG" format, when the source offered one.</summary>
     public byte[]? ClipboardPng { get; init; }
+    public bool ImagePayloadTooLarge { get; init; }
 
     /// <summary>Frozen bitmap fallback, used when no "PNG" format was offered.</summary>
     public BitmapSource? Image { get; init; }
@@ -38,6 +39,7 @@ internal sealed class ClipboardSnapshot
         && string.IsNullOrEmpty(Html)
         && string.IsNullOrEmpty(Rtf)
         && ClipboardPng is not { Length: > 0 }
+        && !ImagePayloadTooLarge
         && Image is null
         && FilePaths.Count == 0;
 }
@@ -93,6 +95,9 @@ internal sealed class ClipboardFormatReader
         }
 
         // Opt-out check runs before a single byte of content is touched.
+        if (ClipboardExclusionDetector.IsPresent(data, ClipboardRestoreService.RestoredFormat, _logger))
+            return null;
+
         if (ClipboardExclusionDetector.IsExcluded(data, _logger, out var marker))
         {
             _logger.Info("ClipboardExcluded", $"Skipped by format: {marker}");
@@ -122,6 +127,7 @@ internal sealed class ClipboardFormatReader
         string? html = null;
         string? rtf = null;
         byte[]? clipboardPng = null;
+        var imagePayloadTooLarge = false;
         BitmapSource? image = null;
         IReadOnlyList<string> files = [];
 
@@ -140,12 +146,15 @@ internal sealed class ClipboardFormatReader
         {
             if (settings.CaptureImages)
             {
-                clipboardPng = ThumbnailService.TryReadClipboardPng(data);
-                if (clipboardPng is null && data.GetDataPresent(DataFormats.Bitmap)
+                clipboardPng = ThumbnailService.TryReadClipboardPng(data, settings.MaxItemSizeBytes, out imagePayloadTooLarge);
+                if (clipboardPng is null && !imagePayloadTooLarge && data.GetDataPresent(DataFormats.Bitmap)
                     && data.GetData(DataFormats.Bitmap) is BitmapSource bmp)
                 {
                     // Freezing here is what makes the bitmap safe to touch off-thread.
-                    image = ThumbnailService.ToFrozenBitmapSource(bmp);
+                    if (ThumbnailService.IsWithinDecodeBudget(bmp))
+                        image = ThumbnailService.ToFrozenBitmapSource(bmp);
+                    else
+                        imagePayloadTooLarge = true;
                 }
             }
         }
@@ -191,6 +200,7 @@ internal sealed class ClipboardFormatReader
             Html = html,
             Rtf = rtf,
             ClipboardPng = clipboardPng,
+            ImagePayloadTooLarge = imagePayloadTooLarge,
             Image = image,
             FilePaths = files,
         };
@@ -268,13 +278,16 @@ internal sealed class ClipboardFormatReader
             };
         }
 
+        if (snapshot.ImagePayloadTooLarge)
+            return NewClipboardItemDataExtensions.OversizedSentinel();
+
         if (snapshot.ClipboardPng is { Length: > 0 })
             return BuildImageItemFromPngBytes(snapshot.ClipboardPng, settings, text);
 
         if (snapshot.Image is not null)
         {
             var image = snapshot.Image;
-            if (!ImageSizeGuard.IsWithinBudget(image.PixelWidth, image.PixelHeight))
+            if (!ThumbnailService.IsWithinDecodeBudget(image))
             {
                 _logger.Warn("ImageTooLarge", "Rejected image dimensions");
                 return null;
@@ -345,26 +358,19 @@ internal sealed class ClipboardFormatReader
     {
         try
         {
-            var info = new FileInfo(path);
-            if (!info.Exists)
-                return null;
-
-            if (!IsWithinSizeLimit(settings, info.Length))
-                return NewClipboardItemDataExtensions.OversizedSentinel();
-
-            var originalBytes = File.ReadAllBytes(path);
-            if (originalBytes.Length == 0)
-                return null;
-
-            if (!ThumbnailService.TryGetImageDimensions(originalBytes, out var width, out var height))
+            byte[]? originalBytes;
+            using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, FileOptions.SequentialScan))
             {
-                _logger.Warn("OriginalImageDecode", "Could not read image dimensions");
-                return null;
+                originalBytes = ImageSizeGuard.ReadEncodedImage(file, settings.MaxItemSizeBytes, out var oversized);
+                if (oversized)
+                    return NewClipboardItemDataExtensions.OversizedSentinel();
             }
+            if (originalBytes is null)
+                return null;
 
-            if (!ImageSizeGuard.IsWithinBudget(width, height))
+            if (!ThumbnailService.TryGetSafeImageDimensions(originalBytes, out var width, out var height))
             {
-                _logger.Warn("ImageTooLarge", "Rejected image dimensions");
+                _logger.Warn("OriginalImageDecode", "Rejected unsupported or over-limit image dimensions");
                 return null;
             }
 
@@ -404,13 +410,14 @@ internal sealed class ClipboardFormatReader
                 });
             }
 
+            var total = payloads.Sum(p => (long)p.Bytes.LongLength);
+            if (!IsWithinSizeLimit(settings, total))
+                return NewClipboardItemDataExtensions.OversizedSentinel();
+
             var hashPayloads = payloads
                 .Select(p => (p.Format, (ReadOnlyMemory<byte>)p.Bytes))
                 .ToList();
             var hash = ContentHasher.ComputeHash(hashPayloads, paths);
-            var total = payloads.Sum(p => (long)p.Bytes.LongLength);
-            if (!IsWithinSizeLimit(settings, total))
-                return NewClipboardItemDataExtensions.OversizedSentinel();
 
             return new NewClipboardItemData
             {
@@ -437,6 +444,17 @@ internal sealed class ClipboardFormatReader
         string? text,
         BitmapSource? sourceForThumb = null)
     {
+        if (png.Length > ImageSizeGuard.MaxEncodedBytes || !IsWithinSizeLimit(settings, png.Length))
+            return NewClipboardItemDataExtensions.OversizedSentinel();
+
+        var width = sourceForThumb?.PixelWidth ?? 0;
+        var height = sourceForThumb?.PixelHeight ?? 0;
+        if (sourceForThumb is null && !ThumbnailService.TryGetSafeImageDimensions(png, out width, out height, pngOnly: true))
+        {
+            _logger.Warn("ClipboardImageDecode", "Rejected unsupported or over-limit PNG dimensions");
+            return null;
+        }
+
         var payloads = new List<(ClipboardFormatKind Format, byte[] Bytes, string? RelativeFileName)>
         {
             (ClipboardFormatKind.ImagePng, png, null),
@@ -446,7 +464,7 @@ internal sealed class ClipboardFormatReader
         if (sourceForThumb is not null)
             thumb = _thumbnails.CreateThumbnailPng(sourceForThumb);
         else
-            thumb = _thumbnails.CreateThumbnailPngFromImageBytes(png);
+            thumb = _thumbnails.CreateThumbnailPngFromImageBytes(png, pngOnly: true);
 
         if (thumb is not null)
             payloads.Add((ClipboardFormatKind.ThumbnailPng, thumb, null));
@@ -454,21 +472,10 @@ internal sealed class ClipboardFormatReader
         if (!string.IsNullOrEmpty(text) && settings.CaptureText)
             payloads.Add((ClipboardFormatKind.UnicodeText, Encoding.UTF8.GetBytes(text), null));
 
-        var hash = ContentHasher.ComputeHash(payloads.Select(p => (p.Format, (ReadOnlyMemory<byte>)p.Bytes)).ToList());
         if (!IsWithinSizeLimit(settings, payloads.Sum(p => (long)p.Bytes.Length)))
             return NewClipboardItemDataExtensions.OversizedSentinel();
 
-        if (!ThumbnailService.TryGetImageDimensions(png, out var width, out var height))
-        {
-            width = sourceForThumb?.PixelWidth ?? 0;
-            height = sourceForThumb?.PixelHeight ?? 0;
-        }
-
-        if (width > 0 && height > 0 && !ImageSizeGuard.IsWithinBudget(width, height))
-        {
-            _logger.Warn("ImageTooLarge", "Rejected image dimensions");
-            return null;
-        }
+        var hash = ContentHasher.ComputeHash(payloads.Select(p => (p.Format, (ReadOnlyMemory<byte>)p.Bytes)).ToList());
 
         return new NewClipboardItemData
         {
@@ -476,8 +483,8 @@ internal sealed class ClipboardFormatReader
             ContentHash = hash,
             PreviewText = string.IsNullOrWhiteSpace(text) ? "Image" : TextPreview.Create(text),
             CharacterCount = text?.Length ?? 0,
-            ImageWidth = width > 0 ? width : null,
-            ImageHeight = height > 0 ? height : null,
+            ImageWidth = width,
+            ImageHeight = height,
             Payloads = payloads.Select(p => new PayloadWriteRequest
             {
                 Format = p.Format,

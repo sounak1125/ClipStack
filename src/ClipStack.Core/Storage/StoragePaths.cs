@@ -30,7 +30,9 @@ public sealed class StoragePaths
 
     public void EnsureCreated()
     {
+        PathSafety.ThrowIfReparsePoint(Root);
         Directory.CreateDirectory(Root);
+        PathSafety.ThrowIfReparsePoint(Items);
         Directory.CreateDirectory(Items);
         Directory.CreateDirectory(Logs);
     }

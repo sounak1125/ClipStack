@@ -27,7 +27,7 @@ public static class ImageFileDetector
     }
 
     /// <summary>
-    /// True when there is exactly one path and it is an existing image file.
+    /// True when there is exactly one path and it is an existing local image file.
     /// Mixed or multi-file drops stay as normal file lists.
     /// </summary>
     public static bool IsSingleExistingImageFile(IReadOnlyList<string> paths)
@@ -36,12 +36,36 @@ public static class ImageFileDetector
             return false;
 
         var path = paths[0];
-        if (!IsImageFilePath(path))
+        if (!IsImageFilePath(path) || !Path.IsPathFullyQualified(path))
             return false;
 
         try
         {
-            return File.Exists(path) && !Directory.Exists(path);
+            if (!OperatingSystem.IsWindows())
+                return File.Exists(path);
+
+            // A clipboard path may be a network share, device path, or alternate data
+            // stream. Keep those as file-drop references without opening them on copy.
+            if (path.Length < 3 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || path.AsSpan(2).Contains(':'))
+                return false;
+
+            var root = Path.GetPathRoot(path)!;
+            if (new DriveInfo(root).DriveType is not (DriveType.Fixed or DriveType.Removable or DriveType.CDRom or DriveType.Ram))
+                return false;
+
+            // Check from the volume outward so an intermediate link cannot send this
+            // automatic read to a network share or trigger a cloud file download.
+            var current = root;
+            var attributes = FileAttributes.Directory;
+            foreach (var component in path[root.Length..].Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                current = Path.Combine(current, component);
+                attributes = File.GetAttributes(current);
+                if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Offline)) != 0)
+                    return false;
+            }
+
+            return (attributes & FileAttributes.Directory) == 0;
         }
         catch
         {

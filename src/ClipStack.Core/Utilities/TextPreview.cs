@@ -94,5 +94,4 @@ public static class TextPreview
         return string.Join('\n', lines.Take(maxLines));
     }
 
-    public static long Utf8ByteCount(string text) => Encoding.UTF8.GetByteCount(text);
 }

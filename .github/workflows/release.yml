@@ -31,14 +31,16 @@ jobs:
       - name: Resolve release version
         id: version
         shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $version = "${{ inputs.version }}"
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $version = $env:REQUESTED_VERSION
           } else {
-            $version = "${{ github.ref_name }}".TrimStart("v")
+            $version = $env:GITHUB_REF_NAME.TrimStart("v")
           }
 
-          if ($version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9\.-]+)?$') {
+          if ($version -notmatch '\A[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?\z') {
             throw "Invalid semantic version: $version"
           }
 
@@ -50,33 +52,40 @@ jobs:
 
       - name: Download previous release metadata
         shell: pwsh
+        env:
+          RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           dotnet tool run vpk download github `
-            --repoUrl "https://github.com/${{ github.repository }}" `
-            --token "${{ secrets.GITHUB_TOKEN }}" `
+            --repoUrl "https://github.com/$env:GITHUB_REPOSITORY" `
+            --token $env:RELEASE_TOKEN `
             --channel win `
             --outputDir artifacts/releases
 
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "No previous release was available; creating the first full package."
+            Write-Host "Could not download the previous release. Creating a full package."
           }
 
       - name: Build and package
         shell: pwsh
-        run: .\tools\build-release.ps1 -Version "${{ steps.version.outputs.value }}"
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: .\tools\build-release.ps1 -Version $env:RELEASE_VERSION
 
       - name: Publish GitHub release
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+          RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           dotnet tool run vpk upload github `
-            --repoUrl "https://github.com/${{ github.repository }}" `
-            --token "${{ secrets.GITHUB_TOKEN }}" `
+            --repoUrl "https://github.com/$env:GITHUB_REPOSITORY" `
+            --token $env:RELEASE_TOKEN `
             --channel win `
             --outputDir artifacts/releases `
             --publish `
-            --tag "v${{ steps.version.outputs.value }}" `
-            --releaseName "ClipStack ${{ steps.version.outputs.value }}" `
-            --targetCommitish "${{ github.sha }}"
+            --tag "v$env:RELEASE_VERSION" `
+            --releaseName "ClipStack $env:RELEASE_VERSION" `
+            --targetCommitish $env:GITHUB_SHA
 
           if ($LASTEXITCODE -ne 0) {
             throw "GitHub release upload failed with exit code $LASTEXITCODE."

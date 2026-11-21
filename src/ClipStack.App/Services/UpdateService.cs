@@ -1,6 +1,5 @@
 using ClipStack.Core;
 using ClipStack.Core.Models;
-using ClipStack.Core.Settings;
 using ClipStack.Core.Storage;
 using ClipStack.Core.Updates;
 using ClipStack.Core.Utilities;
@@ -13,10 +12,9 @@ namespace ClipStack.Services;
 public sealed class UpdateService
 {
     private readonly SettingsStore _settings;
-    private readonly ReleaseConfigStore _releaseStore;
     private readonly FileLogger _logger;
-    private ReleaseConfiguration _release;
-    private UpdateManager? _manager;
+    private readonly ReleaseConfiguration _release;
+    private readonly UpdateManager? _manager;
     private UpdateInfo? _pending;
     private string _status = "Idle";
     private int _checkRunning;
@@ -24,13 +22,12 @@ public sealed class UpdateService
     public event Action? StatusChanged;
     public event Action<string>? UpdateReady;
 
-    public UpdateService(SettingsStore settings, ReleaseConfigStore releaseStore, FileLogger logger, ReleaseConfiguration release)
+    public UpdateService(SettingsStore settings, FileLogger logger, ReleaseConfiguration release)
     {
         _settings = settings;
-        _releaseStore = releaseStore;
         _logger = logger;
         _release = release;
-        RebuildManager();
+        _manager = CreateManager();
     }
 
     public string Status
@@ -60,40 +57,38 @@ public sealed class UpdateService
         }
     }
 
-    public bool IsFeedConfigured => _release.IsConfigured;
+    public string FeedStatus => !_release.IsConfigured ? "No feed" : _manager is null ? "Feed unavailable" : "Feed configured";
 
-    public string FeedStatus => _release.IsConfigured ? "Feed configured" : "No feed";
-
-    public void ReloadConfiguration()
+    private UpdateManager? CreateManager()
     {
-        _release = _releaseStore.Load();
-        RebuildManager();
-        StatusChanged?.Invoke();
-    }
-
-    private void RebuildManager()
-    {
-        _manager = null;
         if (!_release.IsConfigured)
-            return;
+            return null;
+
+        if (!Uri.TryCreate(_release.FeedUrl.Trim(), UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttps || string.IsNullOrEmpty(uri.Host) || uri.UserInfo.Length != 0)
+        {
+            _logger.Warn("UpdateFeed", "The update feed must be an HTTPS URL without embedded credentials.");
+            Status = "Unavailable";
+            return null;
+        }
 
         try
         {
-            var feedUrl = _release.FeedUrl.Trim();
-            IUpdateSource source = IsGitHubRepositoryUrl(feedUrl)
-                ? new GithubSource(feedUrl, accessToken: null, prerelease: false)
-                : new SimpleWebSource(feedUrl);
+            IUpdateSource source = uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase)
+                ? new GithubSource(uri.AbsoluteUri, accessToken: null, prerelease: false)
+                : new SimpleWebSource(uri.AbsoluteUri);
 
             var options = new UpdateOptions();
             if (!string.IsNullOrWhiteSpace(_release.Channel))
                 options.ExplicitChannel = _release.Channel.Trim();
 
-            _manager = new UpdateManager(source, options);
+            return new UpdateManager(source, options);
         }
         catch (Exception ex)
         {
             _logger.Error("UpdateManagerCreate", ex);
             Status = "Unavailable";
+            return null;
         }
     }
 
@@ -246,9 +241,4 @@ public sealed class UpdateService
         }
     }
 
-    private static bool IsGitHubRepositoryUrl(string value)
-    {
-        return Uri.TryCreate(value, UriKind.Absolute, out var uri)
-               && uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase);
-    }
 }

@@ -1,5 +1,3 @@
-using System.IO;
-using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using ClipStack.Core.Utilities;
@@ -10,6 +8,7 @@ internal sealed class ThumbnailService
 {
     public const int MaxWidth = 256;
     public const int MaxHeight = 160;
+    private static ReadOnlySpan<byte> PngSignature => [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
     private readonly FileLogger _logger;
 
@@ -22,6 +21,9 @@ internal sealed class ThumbnailService
     {
         try
         {
+            if (!IsWithinDecodeBudget(source))
+                return null;
+
             var scale = Math.Min(1.0, Math.Min(MaxWidth / (double)source.PixelWidth, MaxHeight / (double)source.PixelHeight));
             BitmapSource scaled = source;
             if (scale < 1.0)
@@ -43,31 +45,12 @@ internal sealed class ThumbnailService
         }
     }
 
-    public static BitmapSource? LoadFrozenThumbnail(string path)
-    {
-        if (!File.Exists(path))
-            return null;
-
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        var bitmap = new BitmapImage();
-        bitmap.BeginInit();
-        bitmap.CacheOption = BitmapCacheOption.OnLoad;
-        bitmap.StreamSource = stream;
-        bitmap.EndInit();
-        bitmap.Freeze();
-        return bitmap;
-    }
-
-    public byte[]? CreateThumbnailPngFromImageBytes(byte[] imageBytes)
+    public byte[]? CreateThumbnailPngFromImageBytes(byte[] imageBytes, bool pngOnly = false)
     {
         try
         {
             using var ms = new MemoryStream(imageBytes, writable: false);
-            var decoder = BitmapDecoder.Create(ms, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-            var frame = decoder.Frames[0];
-            if (frame.CanFreeze && !frame.IsFrozen)
-                frame.Freeze();
-            return CreateThumbnailPng(frame);
+            return CreateThumbnailPng(ReadFirstFrame(ms, pngOnly));
         }
         catch (Exception ex)
         {
@@ -76,17 +59,23 @@ internal sealed class ThumbnailService
         }
     }
 
-    public static bool TryGetImageDimensions(byte[] imageBytes, out int width, out int height)
+    public static bool TryGetSafeImageDimensions(byte[] imageBytes, out int width, out int height, bool pngOnly = false)
     {
         width = 0;
         height = 0;
+        if (imageBytes.Length > ImageSizeGuard.MaxEncodedBytes || (pngOnly && !HasPngSignature(imageBytes)))
+            return false;
+
         try
         {
             using var ms = new MemoryStream(imageBytes, writable: false);
-            var decoder = BitmapDecoder.Create(ms, BitmapCreateOptions.DelayCreation, BitmapCacheOption.OnDemand);
-            width = decoder.Frames[0].PixelWidth;
-            height = decoder.Frames[0].PixelHeight;
-            return width > 0 && height > 0;
+            var frame = ReadFirstFrame(ms, pngOnly);
+            if (!IsWithinDecodeBudget(frame))
+                return false;
+
+            width = frame.PixelWidth;
+            height = frame.PixelHeight;
+            return true;
         }
         catch
         {
@@ -94,20 +83,18 @@ internal sealed class ThumbnailService
         }
     }
 
-    public static byte[]? TryReadClipboardPng(IDataObject data)
+    public static byte[]? TryReadClipboardPng(IDataObject data, long configuredLimit, out bool oversized)
     {
+        oversized = false;
         try
         {
-            if (!data.GetDataPresent("PNG"))
+            if (!data.GetDataPresent("PNG", autoConvert: false))
                 return null;
 
-            if (data.GetData("PNG") is not Stream stream)
+            if (data.GetData("PNG", autoConvert: false) is not Stream stream)
                 return null;
 
-            using var copy = new MemoryStream();
-            stream.CopyTo(copy);
-            var bytes = copy.ToArray();
-            return bytes.Length > 0 ? bytes : null;
+            return ImageSizeGuard.ReadEncodedImage(stream, configuredLimit, out oversized);
         }
         catch
         {
@@ -115,8 +102,11 @@ internal sealed class ThumbnailService
         }
     }
 
-    public static BitmapSource? LoadFrozenFromBytes(byte[] imageBytes)
+    public static BitmapSource? LoadFrozenFromBytes(byte[] imageBytes, bool pngOnly = false)
     {
+        if (!TryGetSafeImageDimensions(imageBytes, out _, out _, pngOnly))
+            return null;
+
         using var ms = new MemoryStream(imageBytes, writable: false);
         var bitmap = new BitmapImage();
         bitmap.BeginInit();
@@ -126,6 +116,20 @@ internal sealed class ThumbnailService
         bitmap.Freeze();
         return bitmap;
     }
+
+    public static bool HasPngSignature(ReadOnlySpan<byte> bytes) => bytes.StartsWith(PngSignature);
+
+    private static BitmapFrame ReadFirstFrame(Stream stream, bool pngOnly)
+    {
+        const BitmapCreateOptions options = BitmapCreateOptions.DelayCreation | BitmapCreateOptions.PreservePixelFormat;
+        return pngOnly
+            ? new PngBitmapDecoder(stream, options, BitmapCacheOption.OnDemand).Frames[0]
+            : BitmapFrame.Create(stream, options, BitmapCacheOption.OnDemand);
+    }
+
+    public static bool IsWithinDecodeBudget(BitmapSource source) => ImageSizeGuard.IsWithinBudget(
+        source.PixelWidth, source.PixelHeight, Math.Max(4, (source.Format.BitsPerPixel + 7) / 8),
+        ImageSizeGuard.DefaultMaxUncompressedBytes);
 
     public static byte[] EncodePng(BitmapSource source)
     {

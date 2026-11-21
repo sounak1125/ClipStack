@@ -7,7 +7,7 @@ namespace ClipStack.Core.Storage;
 /// </summary>
 /// <remarks>
 /// The key is derived from the user's Windows credentials and never stored by ClipStack,
-/// so another account on the same machine cannot read the history even with file access.
+/// so encrypted bytes remain protected when another account has file access.
 /// This protects clips the source application never marked as sensitive — the exclusion
 /// formats in <see cref="Utilities.ClipboardExclusionFormats"/> only help when the source
 /// app cooperates.
@@ -42,7 +42,7 @@ public static class PayloadProtector
         return true;
     }
 
-    /// <summary>Encrypts and prefixes the magic header. Returns the input unchanged on any failure.</summary>
+    /// <summary>Encrypts and prefixes the magic header. Encryption errors propagate to the caller.</summary>
     public static byte[] Protect(byte[] plaintext)
     {
         if (plaintext.Length == 0)

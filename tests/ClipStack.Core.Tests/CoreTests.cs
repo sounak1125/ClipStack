@@ -449,6 +449,28 @@ public class ImageSizeGuardTests
         Assert.IsFalse(ImageSizeGuard.TryEstimateUncompressedBytes(int.MaxValue, int.MaxValue, 4, out _));
         Assert.IsFalse(ImageSizeGuard.IsWithinBudget(20000, 20000));
         Assert.IsTrue(ImageSizeGuard.IsWithinBudget(100, 100));
+        Assert.IsFalse(ImageSizeGuard.IsWithinBudget(8192, 8192, 16, ImageSizeGuard.DefaultMaxUncompressedBytes));
+    }
+
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public void ReadEncodedImage_EnforcesLimitOnSeekableAndStreamingInputs(bool seekable)
+    {
+        byte[] bytes = [1, 2, 3, 4];
+        using MemoryStream exact = seekable ? new MemoryStream(bytes) : new NonSeekableImageStream(bytes);
+        CollectionAssert.AreEqual(bytes, ImageSizeGuard.ReadEncodedImage(exact, bytes.Length, out var oversized));
+        Assert.IsFalse(oversized);
+
+        using MemoryStream overLimit = seekable ? new MemoryStream(bytes) : new NonSeekableImageStream(bytes);
+        Assert.IsNull(ImageSizeGuard.ReadEncodedImage(overLimit, bytes.Length - 1, out oversized));
+        Assert.IsTrue(oversized);
+        Assert.AreEqual(seekable ? 0L : bytes.LongLength, overLimit.Position);
+    }
+
+    private sealed class NonSeekableImageStream(byte[] bytes) : MemoryStream(bytes)
+    {
+        public override bool CanSeek => false;
     }
 }
 
@@ -714,6 +736,9 @@ public class PayloadEncryptionTests
         var store = new HistoryStore(new StoragePaths(_root)) { EncryptPayloads = true };
         store.Initialize();
         var item = Add(store, "persisted secret");
+        var index = File.ReadAllBytes(new StoragePaths(_root).IndexFile);
+        Assert.IsTrue(PayloadProtector.IsProtected(index));
+        Assert.DoesNotContain("persisted secret", Encoding.UTF8.GetString(index), StringComparison.Ordinal);
 
         var reloaded = new HistoryStore(new StoragePaths(_root));
         reloaded.Initialize();
@@ -735,6 +760,7 @@ public class PayloadEncryptionTests
 
         var upgraded = new HistoryStore(new StoragePaths(_root)) { EncryptPayloads = true };
         upgraded.Initialize();
+        Assert.IsTrue(PayloadProtector.IsProtected(File.ReadAllBytes(new StoragePaths(_root).IndexFile)));
 
         // Old clip readable...
         Assert.AreEqual(
@@ -1181,12 +1207,8 @@ public class ClipboardHistoryViewTests
 }
 
 [TestClass]
-public class SelfCopyHashTests
+public class TextOnlyHashTests
 {
-    /// <summary>
-    /// A plain-text paste republishes text alone, so the clip coming back hashes to
-    /// something the stored rich-text hash cannot match. Suppression has to arm both.
-    /// </summary>
     [TestMethod]
     public void TextOnlyHash_DiffersFromRichTextHash_ForTheSameText()
     {
@@ -1201,10 +1223,6 @@ public class SelfCopyHashTests
         Assert.AreNotEqual(richHash, ContentHasher.ComputeTextOnlyHash(text));
     }
 
-    /// <summary>
-    /// It must equal what the capture path produces for a text-only clipboard, or
-    /// suppressing on it would never fire.
-    /// </summary>
     [TestMethod]
     public void TextOnlyHash_MatchesCaptureOfATextOnlyClipboard()
     {

@@ -1,14 +1,16 @@
 #Requires -Version 5.1
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Version
+    [string]$Version,
+    [ValidateNotNullOrEmpty()]
+    [string]$ArtifactsDirectory = "artifacts"
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 function Assert-Version([string]$v) {
-    if ($v -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9\.-]+)?$') {
+    if ($v -notmatch '\A[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?\z') {
         throw "Invalid version '$v'. Expected semver like 0.1.0"
     }
 }
@@ -27,6 +29,12 @@ Assert-Version $Version
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+if (-not [System.IO.Path]::IsPathRooted($ArtifactsDirectory)) {
+    $ArtifactsDirectory = Join-Path $root $ArtifactsDirectory
+}
+$artifactRoot = [System.IO.Path]::GetFullPath($ArtifactsDirectory)
+$numericVersion = ($Version -split '-', 2)[0]
+
 Write-Host "==> ClipStack release build $Version" -ForegroundColor Cyan
 
 Write-Host "==> Restoring local tools (vpk)"
@@ -41,11 +49,12 @@ Write-Host "==> Running tests"
 dotnet test .\ClipStack.sln -c Release --nologo
 Assert-ExitCode "Tests"
 
-$publishDir = Join-Path $root "artifacts\publish\win-x64"
-$packDir = Join-Path $root "artifacts\releases"
+$publishRoot = Join-Path $artifactRoot "publish\win-x64"
+$publishDir = Join-Path $publishRoot ([guid]::NewGuid().ToString("N"))
+$packDir = Join-Path $artifactRoot "releases"
 $packageIcon = Join-Path $root "src\ClipStack.App\Assets\clipstack.ico"
 
-if (Test-Path $publishDir) { Remove-Item $publishDir -Recurse -Force }
+# A fresh publish directory prevents stale files from entering the package.
 New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
 New-Item -ItemType Directory -Force -Path $packDir | Out-Null
 
@@ -56,8 +65,8 @@ dotnet publish .\src\ClipStack.App\ClipStack.App.csproj `
     --self-contained true `
     -p:PublishSingleFile=false `
     -p:Version=$Version `
-    -p:AssemblyVersion=$Version.0 `
-    -p:FileVersion=$Version.0 `
+    -p:AssemblyVersion=$numericVersion.0 `
+    -p:FileVersion=$numericVersion.0 `
     -p:InformationalVersion=$Version `
     -o $publishDir
 Assert-ExitCode "Publish"
@@ -84,7 +93,7 @@ dotnet tool run vpk pack `
 Assert-ExitCode "Velopack packaging"
 
 Write-Host ""
-Write-Host "Release complete." -ForegroundColor Green
+Write-Host "Release packaged." -ForegroundColor Green
 Write-Host "Publish output: $publishDir"
 Write-Host "Installer/update files: $packDir"
 Get-ChildItem $packDir | ForEach-Object { Write-Host ("  - " + $_.FullName) }

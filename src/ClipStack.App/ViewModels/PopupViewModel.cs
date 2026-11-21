@@ -51,19 +51,9 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
 
     public string PreviewText => Item.PreviewText;
 
-    public string MetaText
-    {
-        get
-        {
-            return Item.DominantKind switch
-            {
-                ClipboardItemKind.Image => $"{Item.ImageWidth}×{Item.ImageHeight} · {FormatSize(Item.TotalSizeBytes)}",
-                ClipboardItemKind.Files => $"{Item.FileCount} files",
-                ClipboardItemKind.RichText or ClipboardItemKind.Text => $"{Item.CharacterCount:N0} chars",
-                _ => FormatSize(Item.TotalSizeBytes),
-            };
-        }
-    }
+    public string ImageMetaText => Item.ImageWidth is int width && Item.ImageHeight is int height
+        ? $"{width}×{height} · {FormatSize(Item.TotalSizeBytes)}"
+        : FormatSize(Item.TotalSizeBytes);
 
     public string TimeText
     {
@@ -90,11 +80,6 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
             EnsureThumbnail();
             return _thumbnail;
         }
-        private set
-        {
-            _thumbnail = value;
-            OnPropertyChanged();
-        }
     }
 
     public bool ShowThumbnail => Kind == ClipboardItemKind.Image;
@@ -105,12 +90,11 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
     {
         Item = item;
         ShortcutNumber = shortcutNumber;
-        OnPropertyChanged(nameof(ShortcutNumber));
         OnPropertyChanged(nameof(ShortcutLabel));
         OnPropertyChanged(nameof(Kind));
         OnPropertyChanged(nameof(KindLabel));
         OnPropertyChanged(nameof(PreviewText));
-        OnPropertyChanged(nameof(MetaText));
+        OnPropertyChanged(nameof(ImageMetaText));
         OnPropertyChanged(nameof(TimeText));
         OnPropertyChanged(nameof(ShowThumbnail));
         OnPropertyChanged(nameof(Thumbnail));
@@ -127,12 +111,10 @@ public sealed class ClipboardItemViewModel : INotifyPropertyChanged
         {
             // Read through the store rather than opening the file: payloads are encrypted
             // at rest, and only the store knows how to unwrap them.
-            var bytes = _store.ReadPayloadBytes(Item, ClipboardFormatKind.ThumbnailPng);
+            var bytes = _store.ReadPayloadBytes(Item, ClipboardFormatKind.ThumbnailPng, maximumStoredBytes: 2 * 1024 * 1024);
             if (bytes is not { Length: > 0 }) return;
 
-            // Assign the field, not the property: the getter that called us is about to
-            // return it, so raising PropertyChanged mid-binding would be pointless churn.
-            _thumbnail = ThumbnailService.LoadFrozenFromBytes(bytes);
+            _thumbnail = ThumbnailService.LoadFrozenFromBytes(bytes, pngOnly: true);
         }
         catch (Exception ex)
         {
@@ -173,7 +155,7 @@ public sealed class PopupViewModel : INotifyPropertyChanged
     private bool _isPaused;
     private string _headerCount = "0";
     private string _searchText = string.Empty;
-    private bool _isFilterVisible;
+    private bool _autoPaste = true;
 
     // Last values supplied by Refresh, so a keystroke in the search box can rebuild the
     // list without the caller having to hand us settings again.
@@ -207,11 +189,10 @@ public sealed class PopupViewModel : INotifyPropertyChanged
         {
             _isPaused = value;
             OnPropertyChanged();
-            OnPropertyChanged(nameof(PausedText));
         }
     }
 
-    public string PausedText => IsPaused ? "Paused" : string.Empty;
+    public string PasteAction => _autoPaste ? "Paste" : "Copy";
 
     /// <summary>Text in the popup's filter box. Setting it rebuilds the visible list.</summary>
     public string SearchText
@@ -232,23 +213,6 @@ public sealed class PopupViewModel : INotifyPropertyChanged
 
     public bool HasSearchText => _searchText.Length > 0;
 
-    /// <summary>Whether the filter row is shown. Toggled by pressing "/" or Ctrl+F.</summary>
-    public bool IsFilterVisible
-    {
-        get => _isFilterVisible;
-        set
-        {
-            if (_isFilterVisible == value)
-                return;
-
-            _isFilterVisible = value;
-            OnPropertyChanged();
-            OnPropertyChanged(nameof(ShowFilterHint));
-        }
-    }
-
-    public bool ShowFilterHint => !_isFilterVisible;
-
     public string HeaderCount
     {
         get => _headerCount;
@@ -265,10 +229,15 @@ public sealed class PopupViewModel : INotifyPropertyChanged
     /// <summary>Distinguishes "history is empty" from "the filter matched nothing".</summary>
     public string EmptyMessage => HasSearchText ? "No matches" : "No clips";
 
-    public void Refresh(int limit, bool isPaused)
+    public void Refresh(int limit, bool isPaused, bool autoPaste)
     {
         _limit = limit;
         IsPaused = isPaused;
+        if (_autoPaste != autoPaste)
+        {
+            _autoPaste = autoPaste;
+            OnPropertyChanged(nameof(PasteAction));
+        }
         Rebuild();
     }
 
@@ -338,12 +307,6 @@ public sealed class PopupViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(EmptyMessage));
     }
 
-    /// <summary>Always highlight the newest (top) history row.</summary>
-    public void SelectMostRecent()
-    {
-        SelectedItem = Items.FirstOrDefault();
-    }
-
     /// <summary>Re-selects a specific clip after an operation that reorders the list.</summary>
     public void SelectById(Guid id)
     {
@@ -353,7 +316,7 @@ public sealed class PopupViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// Drops the filter and hides the filter row so the next open starts clean.
+    /// Drops the filter so the next open starts clean.
     /// </summary>
     /// <remarks>
     /// Resets the backing fields without rebuilding: this runs while the popup is being
@@ -363,15 +326,12 @@ public sealed class PopupViewModel : INotifyPropertyChanged
     /// </remarks>
     public void ResetSearch()
     {
-        if (_searchText.Length == 0 && !_isFilterVisible)
+        if (_searchText.Length == 0)
             return;
 
         _searchText = string.Empty;
-        _isFilterVisible = false;
         OnPropertyChanged(nameof(SearchText));
         OnPropertyChanged(nameof(HasSearchText));
-        OnPropertyChanged(nameof(IsFilterVisible));
-        OnPropertyChanged(nameof(ShowFilterHint));
         OnPropertyChanged(nameof(EmptyMessage));
     }
 
